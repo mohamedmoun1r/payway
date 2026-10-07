@@ -1,11 +1,21 @@
 import type { Metadata } from 'next';
-import { Cairo } from 'next/font/google';
+import localFont from 'next/font/local';
 import '../globals.css';
 import { LOCALES, type Locale, getDirection, isValidLocale, DEFAULT_LOCALE } from '@/lib/i18n/config';
 
-const cairo = Cairo({
-  subsets: ['arabic', 'latin'],
-  weight: ['400', '500', '600', '700', '800'],
+const cairo = localFont({
+  src: [
+    {
+      path: '../../../public/fonts/Cairo-Regular.ttf',
+      weight: '400',
+      style: 'normal',
+    },
+    {
+      path: '../../../public/fonts/Cairo-Bold.ttf',
+      weight: '700',
+      style: 'normal',
+    },
+  ],
   variable: '--font-cairo',
   display: 'swap',
 });
