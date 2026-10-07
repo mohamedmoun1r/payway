@@ -1,0 +1,43 @@
+{
+  "name": "payway",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test:security": "tsx -r ./scripts/preload-server-only.js scripts/test-phase5-security.ts",
+    "test:connection": "tsx scripts/test-supabase-connection.ts",
+    "test:phase8": "tsx -r ./scripts/preload-server-only.js scripts/test-phase8-regression.ts"
+  },
+  "dependencies": {
+    "@react-pdf/renderer": "^4.9.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.117.2",
+    "arabic-persian-reshaper": "^1.0.1",
+    "bidi-js": "^1.1.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.52.0",
+    "next": "15.2.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "server-only": "^0.0.1",
+    "tailwind-merge": "^3.7.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "15.2.0",
+    "tailwindcss": "^4",
+    "tsx": "^4.23.15",
+    "typescript": "^5"
+  }
+}
