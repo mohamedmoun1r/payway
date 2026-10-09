@@ -106,6 +106,37 @@ const initialAuditCount = MOCK_AUDIT_LOGS.length;
 const paymentAmount = 1500;
 const testIdempotencyKey = `test-idemp-${Date.now()}-001`;
 
+// Verify receipt signing fails closed when the secret is missing, then use a test-only secret.
+// Never depend on a production secret or a hard-coded application fallback in this mock-only suite.
+const originalHmacSecret = process.env.RECEIPT_HMAC_SECRET;
+delete process.env.RECEIPT_HMAC_SECRET;
+let missingHmacSecretRejected = false;
+try {
+  generateReceiptVerificationHash({
+    studentId: testStudent.id,
+    semesterId: testSemester.id,
+    amount: paymentAmount,
+    paymentDate: '2024-10-06',
+    idempotencyKey: 'test-missing-secret',
+  });
+} catch {
+  missingHmacSecretRejected = true;
+} finally {
+  if (originalHmacSecret) {
+    process.env.RECEIPT_HMAC_SECRET = originalHmacSecret;
+  } else {
+    delete process.env.RECEIPT_HMAC_SECRET;
+  }
+}
+assert(
+  missingHmacSecretRejected,
+  '2b. Receipt signing fails closed without HMAC secret',
+  'Missing RECEIPT_HMAC_SECRET throws instead of using a known default'
+);
+
+// Use a test-only value for the remaining mock-only receipt hash assertion.
+process.env.RECEIPT_HMAC_SECRET = 'payway-unit-test-only-secret-not-for-production';
+
 // Validate schema
 const schemaCheck = manualPaymentSchema.safeParse({
   studentId: testStudent.id,
