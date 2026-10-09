@@ -32,7 +32,7 @@ export default async function AdminStudentDetailPage({
 
   // 1. Strict Server Authorization Guard
   const adminContext = await requireAdmin(locale, `/${locale}/admin/students`);
-  const canVoid = adminContext.profile.role === 'SUPER_ADMIN' || adminContext.admin.can_void_payments === true;
+  const canVoid = adminContext.admin.can_void_payments === true;
 
   // 2. Fetch Complete Student Financial Profile
   const profileData = await getAdminStudentProfile(id);

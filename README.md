@@ -72,6 +72,7 @@ The database schema is fully normalized and organized into migration files under
 | [`20261006000001_initial_schema.sql`](supabase/migrations/20261006000001_initial_schema.sql) | DDL for all 8 tables (`profiles`, `students`, `admins`, `semesters`, `student_dues`, `transactions`, `receipts`, `audit_logs`), custom ENUMs, sequential monotonic number generators (`txn_number_seq`, `rcp_number_seq`), performance indexes, and immutability delete-blocking triggers. |
 | [`20261006000002_rls_policies.sql`](supabase/migrations/20261006000002_rls_policies.sql) | Row Level Security (RLS) on all tables. Enforces strict student isolation and blocks all direct browser/client `INSERT` or `UPDATE` operations on financial records (`WITH CHECK (false)`). |
 | [`20261006000003_payment_functions.sql`](supabase/migrations/20261006000003_payment_functions.sql) | Stored procedures: `record_manual_payment_atomic` (atomic balance update, receipt issuance, idempotency check, concurrency lock), `void_transaction_atomic` (controlled reversal with audit reason), and `verify_receipt_public` (privacy-preserving QR lookup exposing zero student PII). |
+| [`20261006000004_void_transaction_role_check.sql`](supabase/migrations/20261006000004_void_transaction_role_check.sql) | Hardens `void_transaction_atomic` database authorization by explicitly verifying caller has role `ADMIN` or `SUPER_ADMIN`. |
 | [`seed.sql`](supabase/seed.sql) | Reproducible synthetic demo dataset with 2 admins (Cashier & Supervisor) and 5 student testing archetypes (unpaid, partially paid, fully paid, scholarship-discounted, multi-semester history). |
 
 ---
@@ -114,6 +115,7 @@ If managing via the Supabase Web Console:
    - Run `supabase/migrations/20261006000001_initial_schema.sql`
    - Run `supabase/migrations/20261006000002_rls_policies.sql`
    - Run `supabase/migrations/20261006000003_payment_functions.sql`
+   - Run `supabase/migrations/20261006000004_void_transaction_role_check.sql`
 
 ### 3. How to Seed Demo Data
 To populate the database with the pre-production pilot test accounts:

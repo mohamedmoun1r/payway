@@ -163,15 +163,15 @@ export async function requireAdmin(
 
 /**
  * Requires an authenticated administrator with explicit void privileges.
- * Respects admins.can_void_payments and SUPER_ADMIN role.
+ * Strictly enforces that the caller has an administrative role (ADMIN or SUPER_ADMIN)
+ * and possesses explicit void authorization (admins.can_void_payments = true).
  */
 export async function requireAdminWithVoidPermission(
   locale: Locale = 'ar'
 ): Promise<AuthenticatedAdminContext> {
   const context = await requireAdmin(locale);
 
-  const hasVoidPermission =
-    context.profile.role === 'SUPER_ADMIN' || context.admin.can_void_payments === true;
+  const hasVoidPermission = context.admin.can_void_payments === true;
 
   if (!hasVoidPermission) {
     throw new Error('FORBIDDEN: Administrator lacks permissions to void or cancel financial records.');

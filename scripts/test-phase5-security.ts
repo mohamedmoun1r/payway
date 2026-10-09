@@ -54,6 +54,7 @@ import {
   resolveCompletedTransactionReplay,
   buildMissingReceiptReplayError,
 } from '../src/lib/actions/payment-idempotency';
+import { evaluateVoidCallerAuthorization } from '../src/lib/auth/void-authorization';
 
 interface TestResult {
   name: string;
@@ -996,6 +997,156 @@ assert(
   validReplayAndActionConsistent,
   '26. Valid receipt replay succeeds with exact normalized data and consistent Server Action enforcement',
   'Confirmed: Object and array receipt shapes return complete identifiers; both pre-RPC and concurrency paths consistently use resolver'
+);
+
+// -----------------------------------------------------------------------------
+// Test 27: Database-Level Void Authorization Hardening (void_transaction_atomic)
+// -----------------------------------------------------------------------------
+// Verifies authorization rules matching public.void_transaction_atomic:
+// 1. A profile with role STUDENT and can_void_payments = true MUST be rejected.
+// 2. An authorized active admin with void permission MUST be accepted.
+// 3. An active admin without void permission MUST be rejected.
+// 4. An active SUPER_ADMIN with can_void_payments = true MUST be accepted.
+// 5. An active SUPER_ADMIN with can_void_payments = false MUST be rejected (Policy Option A: least privilege).
+// 6. An inactive account MUST be rejected.
+// 7. Spoofed caller ID (auth.uid() != p_admin_id) MUST be rejected.
+
+const studentWithVoidPrivilege = evaluateVoidCallerAuthorization({
+  authUid: 'student-uuid-001',
+  adminId: 'student-uuid-001',
+  profile: { id: 'student-uuid-001', role: 'STUDENT', is_active: true },
+  adminRecord: { id: 'student-uuid-001', can_void_payments: true },
+});
+
+const authorizedActiveAdminWithPermission = evaluateVoidCallerAuthorization({
+  authUid: 'admin-uuid-001',
+  adminId: 'admin-uuid-001',
+  profile: { id: 'admin-uuid-001', role: 'ADMIN', is_active: true },
+  adminRecord: { id: 'admin-uuid-001', can_void_payments: true },
+});
+
+const authorizedSuperAdminWithPermission = evaluateVoidCallerAuthorization({
+  authUid: 'superadmin-uuid-001',
+  adminId: 'superadmin-uuid-001',
+  profile: { id: 'superadmin-uuid-001', role: 'SUPER_ADMIN', is_active: true },
+  adminRecord: { id: 'superadmin-uuid-001', can_void_payments: true },
+});
+
+const superAdminWithoutPermission = evaluateVoidCallerAuthorization({
+  authUid: 'superadmin-uuid-003',
+  adminId: 'superadmin-uuid-003',
+  profile: { id: 'superadmin-uuid-003', role: 'SUPER_ADMIN', is_active: true },
+  adminRecord: { id: 'superadmin-uuid-003', can_void_payments: false },
+});
+
+const adminWithoutPermission = evaluateVoidCallerAuthorization({
+  authUid: 'admin-uuid-002',
+  adminId: 'admin-uuid-002',
+  profile: { id: 'admin-uuid-002', role: 'ADMIN', is_active: true },
+  adminRecord: { id: 'admin-uuid-002', can_void_payments: false },
+});
+
+const inactiveAdminWithPermission = evaluateVoidCallerAuthorization({
+  authUid: 'admin-uuid-003',
+  adminId: 'admin-uuid-003',
+  profile: { id: 'admin-uuid-003', role: 'ADMIN', is_active: false },
+  adminRecord: { id: 'admin-uuid-003', can_void_payments: true },
+});
+
+const inactiveSuperAdmin = evaluateVoidCallerAuthorization({
+  authUid: 'superadmin-uuid-002',
+  adminId: 'superadmin-uuid-002',
+  profile: { id: 'superadmin-uuid-002', role: 'SUPER_ADMIN', is_active: false },
+  adminRecord: { id: 'superadmin-uuid-002', can_void_payments: true },
+});
+
+const spoofedCaller = evaluateVoidCallerAuthorization({
+  authUid: 'attacker-uuid-001',
+  adminId: 'victim-admin-uuid-001',
+  profile: { id: 'victim-admin-uuid-001', role: 'ADMIN', is_active: true },
+  adminRecord: { id: 'victim-admin-uuid-001', can_void_payments: true },
+});
+
+// Also perform static migration inspection to ensure the SQL function encodes these exact checks
+const voidMigrationPath = path.join(
+  process.cwd(),
+  'supabase',
+  'migrations',
+  '20261006000004_void_transaction_role_check.sql'
+);
+const voidMigrationExists = fs.existsSync(voidMigrationPath);
+const voidMigrationContent = voidMigrationExists ? fs.readFileSync(voidMigrationPath, 'utf-8') : '';
+
+const migrationHasAntiSpoofing = voidMigrationContent.includes(
+  'auth.uid() IS NOT NULL AND auth.uid() != p_admin_id'
+);
+const migrationHasCallerRoleCheck =
+  voidMigrationContent.includes("v_caller_role IS NULL OR v_caller_role NOT IN ('ADMIN', 'SUPER_ADMIN')");
+const migrationHasVoidPermissionCheck = voidMigrationContent.includes(
+  'v_can_void IS NOT TRUE'
+);
+const migrationReplacesFunction = voidMigrationContent.includes(
+  'CREATE OR REPLACE FUNCTION public.void_transaction_atomic'
+);
+
+// Verify record_manual_payment_atomic in 20261006000003 already enforces the equivalent role check
+const paymentFunctionsMigrationPath = path.join(
+  process.cwd(),
+  'supabase',
+  'migrations',
+  '20261006000003_payment_functions.sql'
+);
+const paymentFunctionsContent = fs.readFileSync(paymentFunctionsMigrationPath, 'utf-8');
+const manualPaymentHasRoleCheck = paymentFunctionsContent.includes(
+  "v_caller_role IS NULL OR v_caller_role NOT IN ('ADMIN', 'SUPER_ADMIN')"
+);
+
+// Verify application guard and UI call sites strictly enforce explicit can_void_payments flag
+const guardsPath = path.join(process.cwd(), 'src', 'lib', 'auth', 'guards.ts');
+const guardsContent = fs.readFileSync(guardsPath, 'utf-8');
+const guardsStrictFlagCheck =
+  guardsContent.includes('const hasVoidPermission = context.admin.can_void_payments === true;') &&
+  !guardsContent.includes("context.profile.role === 'SUPER_ADMIN' || context.admin.can_void_payments === true");
+
+const paymentsPagePath = path.join(process.cwd(), 'src', 'app', '[locale]', 'admin', 'payments', 'page.tsx');
+const paymentsPageContent = fs.readFileSync(paymentsPagePath, 'utf-8');
+const studentPagePath = path.join(process.cwd(), 'src', 'app', '[locale]', 'admin', 'students', '[id]', 'page.tsx');
+const studentPageContent = fs.readFileSync(studentPagePath, 'utf-8');
+
+const pagesStrictFlagCheck =
+  paymentsPageContent.includes('const canVoid = adminContext.admin.can_void_payments === true;') &&
+  !paymentsPageContent.includes("adminContext.profile.role === 'SUPER_ADMIN' || adminContext.admin.can_void_payments === true") &&
+  studentPageContent.includes('const canVoid = adminContext.admin.can_void_payments === true;') &&
+  !studentPageContent.includes("adminContext.profile.role === 'SUPER_ADMIN' || adminContext.admin.can_void_payments === true");
+
+const voidAuthorizationAllCorrect =
+  !studentWithVoidPrivilege.authorized &&
+  studentWithVoidPrivilege.errorCode === 'FORBIDDEN_NOT_ADMIN' &&
+  authorizedActiveAdminWithPermission.authorized &&
+  authorizedSuperAdminWithPermission.authorized &&
+  !superAdminWithoutPermission.authorized &&
+  superAdminWithoutPermission.errorCode === 'FORBIDDEN_NO_VOID_PERMISSION' &&
+  !adminWithoutPermission.authorized &&
+  adminWithoutPermission.errorCode === 'FORBIDDEN_NO_VOID_PERMISSION' &&
+  !inactiveAdminWithPermission.authorized &&
+  inactiveAdminWithPermission.errorCode === 'FORBIDDEN_NOT_ADMIN' &&
+  !inactiveSuperAdmin.authorized &&
+  inactiveSuperAdmin.errorCode === 'FORBIDDEN_NOT_ADMIN' &&
+  !spoofedCaller.authorized &&
+  spoofedCaller.errorCode === 'UNAUTHORIZED' &&
+  voidMigrationExists &&
+  migrationReplacesFunction &&
+  migrationHasAntiSpoofing &&
+  migrationHasCallerRoleCheck &&
+  migrationHasVoidPermissionCheck &&
+  manualPaymentHasRoleCheck &&
+  guardsStrictFlagCheck &&
+  pagesStrictFlagCheck;
+
+assert(
+  voidAuthorizationAllCorrect,
+  '27. Database-level void authorization strictly enforces administrative role, active profile, and void permission',
+  'Confirmed: STUDENT with can_void_payments rejected; active admin/superadmin with permission accepted; superadmin without permission rejected (least privilege); inactive account rejected; anti-spoofing verified; SQL and application guard alignment confirmed'
 );
 
 // -----------------------------------------------------------------------------
