@@ -146,7 +146,27 @@ export async function recordManualPaymentAction(
 
   const validated = parseResult.data;
 
-  // 3. Server-side Pre-computation of Verification Hash (HMAC SHA-256)
+  // 3. Fail closed in production if financial persistence or receipt signing is misconfigured.
+  // Demo/mock financial writes are permitted only outside production.
+  if (process.env.NODE_ENV === 'production' && !isSupabaseConfigured()) {
+    return {
+      success: false,
+      error: isAr
+        ? 'إعدادات قاعدة البيانات غير مكتملة. تم إيقاف عملية السداد لحماية البيانات المالية.'
+        : 'Financial database configuration is incomplete. Payment was blocked.',
+    };
+  }
+
+  if (!process.env.RECEIPT_HMAC_SECRET?.trim()) {
+    return {
+      success: false,
+      error: isAr
+        ? 'إعدادات توقيع الإيصالات غير مكتملة. لم يتم تسجيل أي عملية سداد.'
+        : 'Receipt signing is not configured. No payment was recorded.',
+    };
+  }
+
+  // 4. Server-side Pre-computation of Verification Hash (HMAC SHA-256)
   // RECEIPT_HMAC_SECRET remains strictly in server runtime; never sent to PostgreSQL as a secret
   const verificationHash = generateReceiptVerificationHash({
     studentId: validated.studentId,
@@ -156,7 +176,7 @@ export async function recordManualPaymentAction(
     idempotencyKey: validated.idempotencyKey,
   });
 
-  // 4. Execution via Supabase RPC or Atomic Mock Layer
+  // 5. Execution via Supabase RPC or non-production mock layer
   if (isSupabaseConfigured()) {
     try {
       const supabase = await createClient();
@@ -386,11 +406,21 @@ export async function recordManualPaymentAction(
     }
   }
 
+  // Production must never report success from an in-memory mock dataset.
+  if (process.env.NODE_ENV === 'production') {
+    return {
+      success: false,
+      error: isAr
+        ? 'تعذر الاتصال بقاعدة البيانات المالية. تم إيقاف عملية السداد.'
+        : 'Financial database unavailable. Payment was blocked.',
+    };
+  }
+
   // =========================================================================
-  // 5. ATOMIC PRE-PRODUCTION PILOT MOCK LAYER (Strict Business & Security Logic)
+  // 6. NON-PRODUCTION MOCK LAYER (Strict Business & Security Logic)
   // =========================================================================
 
-  // 5.1 Idempotency Check
+  // 6.1 Idempotency Check
   const existingMockTxn = MOCK_TRANSACTIONS.find(
     (t) => t.idempotency_key === validated.idempotencyKey
   );
@@ -609,7 +639,17 @@ export async function voidTransactionAction(
 
   const { transactionId, voidReason } = parseResult.data;
 
-  // 3. Supabase Live Path
+  // 3. Production must never perform a financial void against mock in-memory data.
+  if (process.env.NODE_ENV === 'production' && !isSupabaseConfigured()) {
+    return {
+      success: false,
+      error: isAr
+        ? 'إعدادات قاعدة البيانات غير مكتملة. تم إيقاف إلغاء المعاملة.'
+        : 'Financial database configuration is incomplete. Transaction void was blocked.',
+    };
+  }
+
+  // 4. Supabase Live Path
   if (isSupabaseConfigured()) {
     try {
       const supabase = await createClient();
@@ -711,7 +751,17 @@ export async function voidTransactionAction(
     }
   }
 
-  // 4. Mock Dataset Fallback
+  // Production must never fall through to mock transaction state.
+  if (process.env.NODE_ENV === 'production') {
+    return {
+      success: false,
+      error: isAr
+        ? 'قاعدة البيانات المالية غير متاحة. تم إيقاف إلغاء المعاملة.'
+        : 'Financial database unavailable. Transaction void was blocked.',
+    };
+  }
+
+  // 5. Non-production mock dataset fallback
   const txnIndex = MOCK_TRANSACTIONS.findIndex((t) => t.id === transactionId);
   if (txnIndex === -1) {
     return {
