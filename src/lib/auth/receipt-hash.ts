@@ -16,10 +16,10 @@ export interface ReceiptHashPayload {
  * This secret NEVER touches PostgreSQL RPC parameters or the client bundle.
  */
 export function generateReceiptVerificationHash(payload: ReceiptHashPayload): string {
-  // Use server secret; fallback provided for local pre-production demo testing
-  const secret =
-    process.env.RECEIPT_HMAC_SECRET ||
-    'cufe-pilot-default-hmac-secret-64-character-token-verification-key-2024';
+  const secret = process.env.RECEIPT_HMAC_SECRET;
+  if (!secret || secret.trim().length === 0) {
+    throw new Error('RECEIPT_HMAC_SECRET is required to generate receipt verification hashes.');
+  }
 
   const serialized = `${payload.studentId}:${payload.semesterId}:${Number(payload.amount).toFixed(2)}:${payload.paymentDate}:${payload.idempotencyKey}`;
 

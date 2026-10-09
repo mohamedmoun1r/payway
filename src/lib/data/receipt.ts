@@ -114,7 +114,7 @@ export async function getAuthorizedReceiptData(
   }
 
   // Fetch cashier employee_id from metadata or admins table
-  let cashierEmployeeId = 'DEMO-ADM-001';
+  let cashierEmployeeId = 'N/A';
   if (raw.transaction.recorded_by) {
     const { data: adminRecord } = await supabase
       .from('admins')
@@ -125,7 +125,7 @@ export async function getAuthorizedReceiptData(
     if (adminRecord?.employee_id) {
       cashierEmployeeId = adminRecord.employee_id;
     } else if (raw.metadata && typeof raw.metadata === 'object' && 'recorded_by' in raw.metadata) {
-      cashierEmployeeId = String((raw.metadata as Record<string, unknown>).recorded_by || 'DEMO-ADM-001');
+      cashierEmployeeId = String((raw.metadata as Record<string, unknown>).recorded_by || 'N/A');
     }
   }
 

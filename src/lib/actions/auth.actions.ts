@@ -5,6 +5,7 @@ import { headers } from 'next/headers';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { logAuthSuccess, logAuthFailure, logAuthLogout } from '@/lib/audit/logger';
+import { isDevMockEnabled } from '@/lib/data/mock-data';
 import type { Locale } from '@/lib/i18n/config';
 
 export interface AuthActionResult {
@@ -26,6 +27,7 @@ async function resolveIdentifierToEmail(identifier: string): Promise<string> {
   }
 
   // Pre-configured synthetic demo mappings for offline/pilot testing
+  // Strictly permitted only when development mocks are explicitly enabled
   const demoMappings: Record<string, string> = {
     'demo-100001': 'demo.student1@eng.cu.edu.eg',
     '100001': 'demo.student1@eng.cu.edu.eg',
@@ -43,7 +45,7 @@ async function resolveIdentifierToEmail(identifier: string): Promise<string> {
     'adm-002': 'admin.super@eng.cu.edu.eg',
   };
 
-  if (demoMappings[trimmed]) {
+  if (isDevMockEnabled() && demoMappings[trimmed]) {
     return demoMappings[trimmed];
   }
 

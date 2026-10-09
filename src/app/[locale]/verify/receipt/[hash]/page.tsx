@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { CheckCircle2, AlertTriangle, XCircle, ShieldCheck, ArrowLeft, ArrowRight } from 'lucide-react';
 import { verifyReceiptByHash } from '@/lib/data/verify-receipt';
 import { isValidLocale, type Locale } from '@/lib/i18n/config';
+import { isDevMockEnabled } from '@/lib/data/mock-data';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,14 +25,16 @@ export default async function VerifyReceiptPage({ params }: VerifyPageProps) {
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8 font-sans">
       <div className="max-w-2xl mx-auto">
-        {/* Pilot Disclaimer Banner */}
-        <div className="mb-6 rounded-md bg-amber-50 p-4 border border-amber-200 text-center shadow-sm">
-          <p className="text-xs font-bold text-amber-800">
-            {isAr
-              ? '⚠️ بيئة تجريبية قبل الإنتاج — بيانات تجريبية فقط — لا توجد معاملات حقيقية'
-              : '⚠️ PRE-PRODUCTION PILOT ENVIRONMENT — DEMO DATA ONLY — NO REAL TRANSACTIONS'}
-          </p>
-        </div>
+        {/* Pilot Disclaimer Banner: Displayed only when development demo/mock mode is active */}
+        {isDevMockEnabled() && (
+          <div className="mb-6 rounded-md bg-amber-50 p-4 border border-amber-200 text-center shadow-sm">
+            <p className="text-xs font-bold text-amber-800">
+              {isAr
+                ? '⚠️ بيئة تجريبية قبل الإنتاج — بيانات تجريبية فقط — لا توجد معاملات حقيقية'
+                : '⚠️ PRE-PRODUCTION PILOT ENVIRONMENT — DEMO DATA ONLY — NO REAL TRANSACTIONS'}
+            </p>
+          </div>
+        )}
 
         {/* University Header Card */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6 text-center">

@@ -23,7 +23,13 @@ import {
   MOCK_TRANSACTIONS,
   MOCK_RECEIPTS,
   MOCK_AUDIT_LOGS,
+  isDevMockEnabled,
+  isSupabaseConfigured,
 } from '@/lib/data/mock-data';
+import {
+  validateIdempotencyReplay,
+  resolveCompletedTransactionReplay,
+} from './payment-idempotency';
 import type { Locale } from '@/lib/i18n/config';
 import type { Database } from '@/types/database.types';
 
@@ -60,11 +66,6 @@ export interface VoidActionResult {
     voidedAt: string;
     status: 'VOIDED';
   };
-}
-
-function isSupabaseConfigured(): boolean {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  return Boolean(url && !url.includes('placeholder-project') && !url.includes('your-project-id'));
 }
 
 /**
@@ -146,7 +147,27 @@ export async function recordManualPaymentAction(
 
   const validated = parseResult.data;
 
-  // 3. Server-side Pre-computation of Verification Hash (HMAC SHA-256)
+  // 3. Fail closed if financial persistence or receipt signing is misconfigured.
+  // Demo/mock financial writes are permitted only when explicitly enabled in development.
+  if (!isSupabaseConfigured() && !isDevMockEnabled()) {
+    return {
+      success: false,
+      error: isAr
+        ? 'إعدادات قاعدة البيانات غير مكتملة. تم إيقاف عملية السداد لحماية البيانات المالية.'
+        : 'Financial database configuration is incomplete. Payment was blocked.',
+    };
+  }
+
+  if (!process.env.RECEIPT_HMAC_SECRET?.trim()) {
+    return {
+      success: false,
+      error: isAr
+        ? 'إعدادات توقيع الإيصالات غير مكتملة. لم يتم تسجيل أي عملية سداد.'
+        : 'Receipt signing is not configured. No payment was recorded.',
+    };
+  }
+
+  // 4. Server-side Pre-computation of Verification Hash (HMAC SHA-256)
   // RECEIPT_HMAC_SECRET remains strictly in server runtime; never sent to PostgreSQL as a secret
   const verificationHash = generateReceiptVerificationHash({
     studentId: validated.studentId,
@@ -156,17 +177,20 @@ export async function recordManualPaymentAction(
     idempotencyKey: validated.idempotencyKey,
   });
 
-  // 4. Execution via Supabase RPC or Atomic Mock Layer
+  // 5. Execution via Supabase RPC or non-production mock layer
   if (isSupabaseConfigured()) {
     try {
       const supabase = await createClient();
 
       // 4.1 Check Idempotency: Has this transaction already been recorded?
-      const { data: existingTxn } = await supabase
+      const { data: existingTxn, error: idempotencyLookupError } = await supabase
         .from('transactions')
         .select(`
           id,
           transaction_number,
+          student_id,
+          semester_id,
+          student_due_id,
           amount,
           payment_method,
           payment_date,
@@ -182,9 +206,22 @@ export async function recordManualPaymentAction(
         .eq('idempotency_key', validated.idempotencyKey)
         .maybeSingle();
 
+      if (idempotencyLookupError) {
+        console.error('[IDEMPOTENCY_LOOKUP_ERROR]', idempotencyLookupError);
+        return {
+          success: false,
+          error: isAr
+            ? 'حدث خطأ أثناء التحقق من تكرار العملية. يرجى إعادة المحاولة.'
+            : 'Error verifying transaction idempotency. Please retry.',
+        };
+      }
+
       if (existingTxn) {
         type RawExistingTxn = typeof existingTxn & {
-          receipt?: { id: string; receipt_number: string }[];
+          receipt?:
+            | { id: string; receipt_number: string }
+            | { id: string; receipt_number: string }[]
+            | null;
           student?: {
             student_number: string;
             profile?: { full_name_ar: string; full_name_en: string };
@@ -192,36 +229,19 @@ export async function recordManualPaymentAction(
           student_due?: { original_amount: number; discount_amount: number; paid_amount: number };
         };
         const raw = existingTxn as unknown as RawExistingTxn;
-        const receipt = raw.receipt?.[0];
-        const remBal = raw.student_due
-          ? Math.max(
-              0,
-              Number(raw.student_due.original_amount) -
-                Number(raw.student_due.discount_amount) -
-                Number(raw.student_due.paid_amount)
-            )
-          : 0;
 
-        return {
-          success: true,
-          data: {
-            transactionId: raw.id,
-            receiptId: receipt?.id || '',
-            transactionNumber: raw.transaction_number,
-            receiptNumber: receipt?.receipt_number || '',
-            studentId: validated.studentId,
-            studentNameAr: raw.student?.profile?.full_name_ar || '',
-            studentNameEn: raw.student?.profile?.full_name_en || '',
-            studentNumber: raw.student?.student_number || '',
-            amount: Number(raw.amount),
-            paymentMethod: raw.payment_method,
-            paymentDate: raw.payment_date,
-            paymentTime: raw.payment_time,
-            newRemainingBalance: remBal,
-            status: raw.status,
-            isDuplicate: true,
-          },
-        };
+        // Verify that the persisted transaction matches the requested parameters using shared helper
+        const replayValidation = validateIdempotencyReplay(raw, validated);
+        if (!replayValidation.isMatch) {
+          return {
+            success: false,
+            error: isAr
+              ? 'تعارض في مفتاح منع التكرار: تم استخدام هذا المفتاح مسبقاً مع بيانات سداد مختلفة أو لمعاملة غير مؤهلة.'
+              : 'Idempotency conflict: The provided idempotency key was previously used with different parameters or for an ineligible transaction.',
+          };
+        }
+
+        return resolveCompletedTransactionReplay(raw, isAr);
       }
 
       // 4.2 Execute atomic PostgreSQL function
@@ -253,36 +273,62 @@ export async function recordManualPaymentAction(
         }
         if (errorMsg.includes('DUPLICATE_SUBMISSION')) {
           // Idempotency collision during concurrent execution; retry lookup
-          const { data: retryTxn } = await supabase
+          const { data: retryTxn, error: retryErr } = await supabase
             .from('transactions')
-            .select('id, transaction_number, amount, payment_method, payment_date, payment_time, status, receipts(id, receipt_number)')
+            .select(`
+              id,
+              transaction_number,
+              student_id,
+              semester_id,
+              student_due_id,
+              amount,
+              payment_method,
+              payment_date,
+              payment_time,
+              status,
+              receipt:receipts(id, receipt_number),
+              student:students!inner(
+                student_number,
+                profile:profiles!inner(full_name_ar, full_name_en)
+              ),
+              student_due:student_dues!inner(original_amount, discount_amount, paid_amount)
+            `)
             .eq('idempotency_key', validated.idempotencyKey)
             .maybeSingle();
 
-          if (retryTxn) {
-            type RawRetry = typeof retryTxn & { receipts?: { id: string; receipt_number: string }[] };
-            const rawRetry = retryTxn as unknown as RawRetry;
+          if (retryErr || !retryTxn) {
             return {
-              success: true,
-              data: {
-                transactionId: rawRetry.id,
-                receiptId: rawRetry.receipts?.[0]?.id || '',
-                transactionNumber: rawRetry.transaction_number,
-                receiptNumber: rawRetry.receipts?.[0]?.receipt_number || '',
-                studentId: validated.studentId,
-                studentNameAr: '',
-                studentNameEn: '',
-                studentNumber: '',
-                amount: Number(rawRetry.amount),
-                paymentMethod: rawRetry.payment_method,
-                paymentDate: rawRetry.payment_date,
-                paymentTime: rawRetry.payment_time,
-                newRemainingBalance: 0,
-                status: rawRetry.status,
-                isDuplicate: true,
-              },
+              success: false,
+              error: isAr
+                ? 'تم تسجيل معاملة مسبقاً بهذا المفتاح ولكن تعذر استرجاع بياناتها.'
+                : 'A duplicate transaction was detected, but its details could not be retrieved.',
             };
           }
+
+          type RawRetry = typeof retryTxn & {
+            receipt?:
+              | { id: string; receipt_number: string }
+              | { id: string; receipt_number: string }[]
+              | null;
+            student?: {
+              student_number: string;
+              profile?: { full_name_ar: string; full_name_en: string };
+            };
+            student_due?: { original_amount: number; discount_amount: number; paid_amount: number };
+          };
+          const rawRetry = retryTxn as unknown as RawRetry;
+
+          const retryValidation = validateIdempotencyReplay(rawRetry, validated);
+          if (!retryValidation.isMatch) {
+            return {
+              success: false,
+              error: isAr
+                ? 'تعارض في مفتاح منع التكرار: تم استخدام هذا المفتاح مسبقاً مع بيانات سداد مختلفة أو لمعاملة غير مؤهلة.'
+                : 'Idempotency conflict: The provided idempotency key was previously used with different parameters or for an ineligible transaction.',
+            };
+          }
+
+          return resolveCompletedTransactionReplay(rawRetry, isAr);
         }
         if (errorMsg.includes('DUE_NOT_FOUND')) {
           return {
@@ -386,16 +432,36 @@ export async function recordManualPaymentAction(
     }
   }
 
+  // Mock dataset is permitted only when explicit development flag is active.
+  if (!isDevMockEnabled()) {
+    return {
+      success: false,
+      error: isAr
+        ? 'تعذر الاتصال بقاعدة البيانات المالية. تم إيقاف عملية السداد.'
+        : 'Financial database unavailable. Payment was blocked.',
+    };
+  }
+
   // =========================================================================
-  // 5. ATOMIC PRE-PRODUCTION PILOT MOCK LAYER (Strict Business & Security Logic)
+  // 6. NON-PRODUCTION MOCK LAYER (Strict Business & Security Logic)
   // =========================================================================
 
-  // 5.1 Idempotency Check
+  // 6.1 Idempotency Check
   const existingMockTxn = MOCK_TRANSACTIONS.find(
     (t) => t.idempotency_key === validated.idempotencyKey
   );
 
   if (existingMockTxn) {
+    const mockValidation = validateIdempotencyReplay(existingMockTxn, validated);
+    if (!mockValidation.isMatch) {
+      return {
+        success: false,
+        error: isAr
+          ? 'تعارض في مفتاح منع التكرار: تم استخدام هذا المفتاح مسبقاً مع بيانات سداد مختلفة أو لمعاملة غير مؤهلة.'
+          : 'Idempotency conflict: The provided idempotency key was previously used with different parameters or for an ineligible transaction.',
+      };
+    }
+
     const rcp = MOCK_RECEIPTS.find((r) => r.transaction_id === existingMockTxn.id);
     const stu = MOCK_STUDENTS.find((s) => s.id === existingMockTxn.student_id);
     const prof = MOCK_PROFILES.find((p) => p.id === existingMockTxn.student_id);
@@ -609,7 +675,17 @@ export async function voidTransactionAction(
 
   const { transactionId, voidReason } = parseResult.data;
 
-  // 3. Supabase Live Path
+  // 3. Mock financial void is permitted only when explicitly enabled in development.
+  if (!isSupabaseConfigured() && !isDevMockEnabled()) {
+    return {
+      success: false,
+      error: isAr
+        ? 'إعدادات قاعدة البيانات غير مكتملة. تم إيقاف إلغاء المعاملة.'
+        : 'Financial database configuration is incomplete. Transaction void was blocked.',
+    };
+  }
+
+  // 4. Supabase Live Path
   if (isSupabaseConfigured()) {
     try {
       const supabase = await createClient();
@@ -711,7 +787,17 @@ export async function voidTransactionAction(
     }
   }
 
-  // 4. Mock Dataset Fallback
+  // Mock dataset fallback is permitted only when explicit development flag is active.
+  if (!isDevMockEnabled()) {
+    return {
+      success: false,
+      error: isAr
+        ? 'قاعدة البيانات المالية غير متاحة. تم إيقاف إلغاء المعاملة.'
+        : 'Financial database unavailable. Transaction void was blocked.',
+    };
+  }
+
+  // 5. Non-production mock dataset fallback
   const txnIndex = MOCK_TRANSACTIONS.findIndex((t) => t.id === transactionId);
   if (txnIndex === -1) {
     return {

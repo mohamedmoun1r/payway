@@ -34,7 +34,7 @@ export default async function AdminPaymentsPage({
 
   // 1. Strict Server Authorization Guard
   const adminContext = await requireAdmin(locale, `/${locale}/admin/payments`);
-  const canVoid = adminContext.profile.role === 'SUPER_ADMIN' || adminContext.admin.can_void_payments === true;
+  const canVoid = adminContext.admin.can_void_payments === true;
 
   // 2. Fetch Filtered Payments from DAL
   const transactions = await getAdminPayments({
