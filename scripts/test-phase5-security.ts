@@ -48,7 +48,12 @@ import {
   isDevMockEnabled,
   isSupabaseConfigured,
 } from '../src/lib/data/mock-data';
-import { validateIdempotencyReplay } from '../src/lib/actions/payment-idempotency';
+import {
+  validateIdempotencyReplay,
+  extractReceiptSummary,
+  resolveCompletedTransactionReplay,
+  buildMissingReceiptReplayError,
+} from '../src/lib/actions/payment-idempotency';
 
 interface TestResult {
   name: string;
@@ -767,6 +772,230 @@ assert(
   paymentActionsGuardsPresent,
   '20. Payment and void server actions fail closed when Supabase is unconfigured and dev mocks are disabled',
   'Confirmed: entry guard and mock layer guard strictly enforce fail-closed financial mutation policy'
+);
+
+// -----------------------------------------------------------------------------
+// Test 21: Receipt Relation Shape Normalization (extractReceiptSummary)
+// -----------------------------------------------------------------------------
+const objReceipt = extractReceiptSummary({
+  id: 'rcp-test-obj-01',
+  receipt_number: 'CUFE-RCP-2024-000101',
+});
+const arrReceipt = extractReceiptSummary([
+  {
+    id: 'rcp-test-arr-02',
+    receipt_number: 'CUFE-RCP-2024-000102',
+  },
+]);
+const emptyArrReceipt = extractReceiptSummary([]);
+const nullReceipt = extractReceiptSummary(null);
+const undefinedReceipt = extractReceiptSummary(undefined);
+const emptyObjReceipt = extractReceiptSummary({});
+const nonObjectArrReceipt = extractReceiptSummary([null]);
+
+const normalizationAllCorrect =
+  objReceipt.id === 'rcp-test-obj-01' &&
+  objReceipt.receiptNumber === 'CUFE-RCP-2024-000101' &&
+  arrReceipt.id === 'rcp-test-arr-02' &&
+  arrReceipt.receiptNumber === 'CUFE-RCP-2024-000102' &&
+  emptyArrReceipt.id === null &&
+  emptyArrReceipt.receiptNumber === null &&
+  nullReceipt.id === null &&
+  nullReceipt.receiptNumber === null &&
+  undefinedReceipt.id === null &&
+  undefinedReceipt.receiptNumber === null &&
+  emptyObjReceipt.id === null &&
+  emptyObjReceipt.receiptNumber === null &&
+  nonObjectArrReceipt.id === null &&
+  nonObjectArrReceipt.receiptNumber === null;
+
+assert(
+  normalizationAllCorrect,
+  '21. Receipt relation shape normalizer safely handles object, array, and missing shapes without fabricating',
+  'PostgREST 1:1 object returns and 1:N array returns correctly extract non-empty IDs; missing/null shapes return null safely'
+);
+
+// -----------------------------------------------------------------------------
+// Test 22: Auth Demo Identifier Mappings Gated Behind isDevMockEnabled()
+// -----------------------------------------------------------------------------
+const authActionsPath = path.join(process.cwd(), 'src', 'lib', 'actions', 'auth.actions.ts');
+const authActionsContent = fs.readFileSync(authActionsPath, 'utf-8');
+
+const authDemoGated =
+  authActionsContent.includes('import { isDevMockEnabled }') &&
+  authActionsContent.includes('isDevMockEnabled() && demoMappings[trimmed]');
+
+assert(
+  authDemoGated,
+  '22. Auth demo identifier mappings strictly gated behind isDevMockEnabled()',
+  'Confirmed: resolveIdentifierToEmail never intercepts normal university identifiers in non-dev environments'
+);
+
+// -----------------------------------------------------------------------------
+// Test 23: Middleware Static Asset Extension Check
+// -----------------------------------------------------------------------------
+const middlewarePath = path.join(process.cwd(), 'src', 'middleware.ts');
+const middlewareContent = fs.readFileSync(middlewarePath, 'utf-8');
+
+const hasBroadDotBypass = middlewareContent.includes("pathname.includes('.')");
+const hasStaticAssetRegex = middlewareContent.includes('STATIC_ASSET_REGEX');
+
+// Test static regex logic directly
+const staticAssetRegex = /\.(ico|png|jpg|jpeg|svg|css|js|map|txt|woff|woff2|ttf|eot|webp)$/i;
+const passesLegitimateAssets =
+  staticAssetRegex.test('/favicon.ico') &&
+  staticAssetRegex.test('/fonts/Cairo-Regular.woff2') &&
+  staticAssetRegex.test('/styles/global.css') &&
+  staticAssetRegex.test('/images/logo.png');
+
+const rejectsProtectedDottedRoutes =
+  !staticAssetRegex.test('/ar/admin/students/user.name') &&
+  !staticAssetRegex.test('/ar/student/transactions/id.123') &&
+  !staticAssetRegex.test('/ar/admin/reports.view');
+
+assert(
+  !hasBroadDotBypass && hasStaticAssetRegex && passesLegitimateAssets && rejectsProtectedDottedRoutes,
+  '23. Middleware replaces broad dot bypass with narrowly scoped static asset extension check',
+  'Preserves legitimate static files while preventing dotted application routes from skipping middleware guards'
+);
+
+// -----------------------------------------------------------------------------
+// Test 24: Receipt Verification Page Demo Disclaimer Gated Behind isDevMockEnabled()
+// -----------------------------------------------------------------------------
+const verifyPagePath = path.join(
+  process.cwd(),
+  'src',
+  'app',
+  '[locale]',
+  'verify',
+  'receipt',
+  '[hash]',
+  'page.tsx'
+);
+const verifyPageContent = fs.readFileSync(verifyPagePath, 'utf-8');
+
+const verifyPageGated =
+  verifyPageContent.includes('import { isDevMockEnabled }') &&
+  verifyPageContent.includes('{isDevMockEnabled() && (');
+
+assert(
+  verifyPageGated,
+  '24. Public receipt verification page demo disclaimer is gated behind isDevMockEnabled()',
+  'Confirmed: Production receipt verification does not falsely claim authentic university receipts are demo data'
+);
+
+// -----------------------------------------------------------------------------
+// Test 25: Missing Receipt Idempotency Replay Fails Closed (resolveCompletedTransactionReplay)
+// -----------------------------------------------------------------------------
+const baseReplayTxn = {
+  id: 'txn-test-replay-001',
+  transaction_number: 'CUFE-TXN-2024-000999',
+  student_id: 'std-test-01',
+  amount: 2500,
+  payment_method: 'CASH',
+  payment_date: '2024-10-10',
+  payment_time: '12:00:00',
+  status: 'COMPLETED',
+  student: {
+    student_number: '2024001',
+    profile: { full_name_ar: 'أحمد محمود', full_name_en: 'Ahmed Mahmoud' },
+  },
+  student_due: {
+    original_amount: 5000,
+    discount_amount: 0,
+    paid_amount: 2500,
+  },
+};
+
+// 1. Replay with null receipt relation
+const nullReceiptReplayAr = resolveCompletedTransactionReplay(
+  { ...baseReplayTxn, receipt: null },
+  true
+);
+const nullReceiptReplayEn = resolveCompletedTransactionReplay(
+  { ...baseReplayTxn, receipt: null },
+  false
+);
+
+// 2. Replay with empty array receipt relation
+const emptyArrReceiptReplay = resolveCompletedTransactionReplay(
+  { ...baseReplayTxn, receipt: [] },
+  true
+);
+
+// 3. Replay with empty / whitespace object receipt
+const invalidObjReceiptReplay = resolveCompletedTransactionReplay(
+  { ...baseReplayTxn, receipt: { id: '   ', receipt_number: '' } },
+  true
+);
+
+// 4. Replay without transaction number
+const noTxnNumReplay = resolveCompletedTransactionReplay(
+  { ...baseReplayTxn, transaction_number: null, receipt: null },
+  true
+);
+
+const missingReceiptFailsClosed =
+  !nullReceiptReplayAr.success &&
+  Boolean(nullReceiptReplayAr.error?.includes('CUFE-TXN-2024-000999')) &&
+  Boolean(nullReceiptReplayAr.error?.includes('سجل المعاملات')) &&
+  !nullReceiptReplayEn.success &&
+  Boolean(nullReceiptReplayEn.error?.includes('CUFE-TXN-2024-000999')) &&
+  Boolean(nullReceiptReplayEn.error?.includes('transaction ledger')) &&
+  !emptyArrReceiptReplay.success &&
+  !invalidObjReceiptReplay.success &&
+  !noTxnNumReplay.success &&
+  !noTxnNumReplay.error?.includes('null');
+
+assert(
+  missingReceiptFailsClosed,
+  '25. Idempotent replay of completed transaction fails closed when receipt is missing or invalid',
+  'Confirmed: Never returns success: true or empty receipt IDs; returns localized ledger check error with safe txn number'
+);
+
+// -----------------------------------------------------------------------------
+// Test 26: Valid Receipt Idempotency Replay & Server Action Consistency
+// -----------------------------------------------------------------------------
+// 1. Valid object receipt replay
+const validObjReplay = resolveCompletedTransactionReplay(
+  {
+    ...baseReplayTxn,
+    receipt: { id: 'rcp-uuid-valid-1', receipt_number: 'CUFE-RCP-2024-000101' },
+  },
+  true
+);
+
+// 2. Valid array receipt replay
+const validArrReplay = resolveCompletedTransactionReplay(
+  {
+    ...baseReplayTxn,
+    receipt: [{ id: 'rcp-uuid-valid-2', receipt_number: 'CUFE-RCP-2024-000102' }],
+  },
+  false
+);
+
+// 3. Consistency check on payment.actions.ts source
+const paymentActionsUpdatedContent = fs.readFileSync(paymentActionsPath, 'utf-8');
+const bothPathsEnforced =
+  paymentActionsUpdatedContent.includes('resolveCompletedTransactionReplay(raw, isAr)') &&
+  paymentActionsUpdatedContent.includes('resolveCompletedTransactionReplay(rawRetry, isAr)') &&
+  !paymentActionsUpdatedContent.includes("receiptId: normalizedReceipt.id ?? ''");
+
+const validReplayAndActionConsistent =
+  validObjReplay.success &&
+  validObjReplay.data?.receiptId === 'rcp-uuid-valid-1' &&
+  validObjReplay.data?.receiptNumber === 'CUFE-RCP-2024-000101' &&
+  validObjReplay.data?.isDuplicate === true &&
+  validArrReplay.success &&
+  validArrReplay.data?.receiptId === 'rcp-uuid-valid-2' &&
+  validArrReplay.data?.receiptNumber === 'CUFE-RCP-2024-000102' &&
+  validArrReplay.data?.isDuplicate === true &&
+  bothPathsEnforced;
+
+assert(
+  validReplayAndActionConsistent,
+  '26. Valid receipt replay succeeds with exact normalized data and consistent Server Action enforcement',
+  'Confirmed: Object and array receipt shapes return complete identifiers; both pre-RPC and concurrency paths consistently use resolver'
 );
 
 // -----------------------------------------------------------------------------

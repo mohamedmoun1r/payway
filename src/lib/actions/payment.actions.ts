@@ -26,7 +26,10 @@ import {
   isDevMockEnabled,
   isSupabaseConfigured,
 } from '@/lib/data/mock-data';
-import { validateIdempotencyReplay } from './payment-idempotency';
+import {
+  validateIdempotencyReplay,
+  resolveCompletedTransactionReplay,
+} from './payment-idempotency';
 import type { Locale } from '@/lib/i18n/config';
 import type { Database } from '@/types/database.types';
 
@@ -215,7 +218,10 @@ export async function recordManualPaymentAction(
 
       if (existingTxn) {
         type RawExistingTxn = typeof existingTxn & {
-          receipt?: { id: string; receipt_number: string }[];
+          receipt?:
+            | { id: string; receipt_number: string }
+            | { id: string; receipt_number: string }[]
+            | null;
           student?: {
             student_number: string;
             profile?: { full_name_ar: string; full_name_en: string };
@@ -235,36 +241,7 @@ export async function recordManualPaymentAction(
           };
         }
 
-        const receipt = raw.receipt?.[0];
-        const remBal = raw.student_due
-          ? Math.max(
-              0,
-              Number(raw.student_due.original_amount) -
-                Number(raw.student_due.discount_amount) -
-                Number(raw.student_due.paid_amount)
-            )
-          : 0;
-
-        return {
-          success: true,
-          data: {
-            transactionId: raw.id,
-            receiptId: receipt?.id || '',
-            transactionNumber: raw.transaction_number,
-            receiptNumber: receipt?.receipt_number || '',
-            studentId: raw.student_id,
-            studentNameAr: raw.student?.profile?.full_name_ar || '',
-            studentNameEn: raw.student?.profile?.full_name_en || '',
-            studentNumber: raw.student?.student_number || '',
-            amount: Number(raw.amount),
-            paymentMethod: raw.payment_method,
-            paymentDate: raw.payment_date,
-            paymentTime: raw.payment_time,
-            newRemainingBalance: remBal,
-            status: raw.status,
-            isDuplicate: true,
-          },
-        };
+        return resolveCompletedTransactionReplay(raw, isAr);
       }
 
       // 4.2 Execute atomic PostgreSQL function
@@ -329,7 +306,10 @@ export async function recordManualPaymentAction(
           }
 
           type RawRetry = typeof retryTxn & {
-            receipt?: { id: string; receipt_number: string }[];
+            receipt?:
+              | { id: string; receipt_number: string }
+              | { id: string; receipt_number: string }[]
+              | null;
             student?: {
               student_number: string;
               profile?: { full_name_ar: string; full_name_en: string };
@@ -348,36 +328,7 @@ export async function recordManualPaymentAction(
             };
           }
 
-          const receipt = rawRetry.receipt?.[0];
-          const remBal = rawRetry.student_due
-            ? Math.max(
-                0,
-                Number(rawRetry.student_due.original_amount) -
-                  Number(rawRetry.student_due.discount_amount) -
-                  Number(rawRetry.student_due.paid_amount)
-              )
-            : 0;
-
-          return {
-            success: true,
-            data: {
-              transactionId: rawRetry.id,
-              receiptId: receipt?.id || '',
-              transactionNumber: rawRetry.transaction_number,
-              receiptNumber: receipt?.receipt_number || '',
-              studentId: rawRetry.student_id,
-              studentNameAr: rawRetry.student?.profile?.full_name_ar || '',
-              studentNameEn: rawRetry.student?.profile?.full_name_en || '',
-              studentNumber: rawRetry.student?.student_number || '',
-              amount: Number(rawRetry.amount),
-              paymentMethod: rawRetry.payment_method,
-              paymentDate: rawRetry.payment_date,
-              paymentTime: rawRetry.payment_time,
-              newRemainingBalance: remBal,
-              status: rawRetry.status,
-              isDuplicate: true,
-            },
-          };
+          return resolveCompletedTransactionReplay(rawRetry, isAr);
         }
         if (errorMsg.includes('DUE_NOT_FOUND')) {
           return {

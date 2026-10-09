@@ -3,15 +3,17 @@ import type { NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { DEFAULT_LOCALE, isValidLocale, type Locale } from './lib/i18n/config';
 
+const STATIC_ASSET_REGEX = /\.(ico|png|jpg|jpeg|svg|css|js|map|txt|woff|woff2|ttf|eot|webp)$/i;
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // 1. Skip public assets, APIs, and next internal assets
+  // 1. Skip public assets, APIs, and static asset file extensions
   if (
     pathname.startsWith('/_next') ||
     pathname.startsWith('/api') ||
     pathname.startsWith('/static') ||
-    pathname.includes('.') // file extension like favicon.ico, fonts, images
+    STATIC_ASSET_REGEX.test(pathname)
   ) {
     return NextResponse.next();
   }
