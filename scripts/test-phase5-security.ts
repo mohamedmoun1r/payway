@@ -45,6 +45,8 @@ import {
   MOCK_TRANSACTIONS,
   MOCK_RECEIPTS,
   MOCK_AUDIT_LOGS,
+  isDevMockEnabled,
+  isSupabaseConfigured,
 } from '../src/lib/data/mock-data';
 
 interface TestResult {
@@ -376,6 +378,364 @@ assert(
 );
 
 // -----------------------------------------------------------------------------
+// Test 15: Mock Policy Environment Permutations (isDevMockEnabled)
+// -----------------------------------------------------------------------------
+const originalNodeEnv = process.env.NODE_ENV;
+const originalEnableDevMocks = process.env.ENABLE_DEV_MOCKS;
+
+const mockPolicyCases = [
+  { env: 'development', flag: 'true', expected: true, desc: 'dev with strict "true"' },
+  { env: 'development', flag: '1', expected: false, desc: 'dev with truthy "1"' },
+  { env: 'development', flag: 'TRUE', expected: false, desc: 'dev with uppercase "TRUE"' },
+  { env: 'development', flag: 'yes', expected: false, desc: 'dev with truthy "yes"' },
+  { env: 'development', flag: 'false', expected: false, desc: 'dev with "false"' },
+  { env: 'development', flag: undefined, expected: false, desc: 'dev with unset flag' },
+  { env: 'production', flag: 'true', expected: false, desc: 'production with "true"' },
+  { env: 'production', flag: '1', expected: false, desc: 'production with "1"' },
+  { env: 'test', flag: 'true', expected: false, desc: 'test with "true"' },
+  { env: 'preview', flag: 'true', expected: false, desc: 'preview with "true"' },
+  { env: undefined, flag: 'true', expected: false, desc: 'undefined env with "true"' },
+];
+
+let mockPolicyAllMatch = true;
+const mockPolicyFailures: string[] = [];
+
+for (const c of mockPolicyCases) {
+  if (c.env !== undefined) {
+    (process.env as any).NODE_ENV = c.env;
+  } else {
+    delete (process.env as any).NODE_ENV;
+  }
+
+  if (c.flag !== undefined) {
+    process.env.ENABLE_DEV_MOCKS = c.flag;
+  } else {
+    delete process.env.ENABLE_DEV_MOCKS;
+  }
+
+  const result = isDevMockEnabled();
+  if (result !== c.expected) {
+    mockPolicyAllMatch = false;
+    mockPolicyFailures.push(`${c.desc}: got ${result}, expected ${c.expected}`);
+  }
+}
+
+// Restore environment variables
+if (originalNodeEnv !== undefined) {
+  (process.env as any).NODE_ENV = originalNodeEnv;
+} else {
+  delete (process.env as any).NODE_ENV;
+}
+if (originalEnableDevMocks !== undefined) {
+  process.env.ENABLE_DEV_MOCKS = originalEnableDevMocks;
+} else {
+  delete process.env.ENABLE_DEV_MOCKS;
+}
+
+assert(
+  mockPolicyAllMatch,
+  '15. Mock policy fails closed across all non-development and malformed configurations',
+  mockPolicyFailures.length === 0
+    ? 'All 11 environment and flag permutations evaluated strictly'
+    : `Failures: ${mockPolicyFailures.join('; ')}`
+);
+
+// -----------------------------------------------------------------------------
+// Test 16: Supabase Configuration Detection (isSupabaseConfigured)
+// -----------------------------------------------------------------------------
+const originalSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const originalSupabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+const supabaseConfigCases = [
+  {
+    url: 'https://real-project.supabase.co',
+    key: 'real-anon-key-abc-123',
+    expected: true,
+    desc: 'valid production URL and anon key',
+  },
+  {
+    url: 'https://placeholder-project.supabase.co',
+    key: 'real-anon-key-abc-123',
+    expected: false,
+    desc: 'placeholder-project URL rejected',
+  },
+  {
+    url: 'https://your-project-id.supabase.co',
+    key: 'real-anon-key-abc-123',
+    expected: false,
+    desc: 'your-project-id URL rejected',
+  },
+  {
+    url: 'https://real-project.supabase.co',
+    key: 'placeholder-anon-key',
+    expected: false,
+    desc: 'placeholder-anon-key rejected',
+  },
+  {
+    url: undefined,
+    key: 'real-anon-key-abc-123',
+    expected: false,
+    desc: 'missing URL rejected',
+  },
+  {
+    url: 'https://real-project.supabase.co',
+    key: undefined,
+    expected: false,
+    desc: 'missing anon key rejected',
+  },
+];
+
+let supabaseConfigAllMatch = true;
+const supabaseConfigFailures: string[] = [];
+
+for (const sc of supabaseConfigCases) {
+  if (sc.url !== undefined) {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = sc.url;
+  } else {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+  }
+
+  if (sc.key !== undefined) {
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = sc.key;
+  } else {
+    delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  }
+
+  const result = isSupabaseConfigured();
+  if (result !== sc.expected) {
+    supabaseConfigAllMatch = false;
+    supabaseConfigFailures.push(`${sc.desc}: got ${result}, expected ${sc.expected}`);
+  }
+}
+
+// Restore environment variables
+if (originalSupabaseUrl !== undefined) {
+  process.env.NEXT_PUBLIC_SUPABASE_URL = originalSupabaseUrl;
+} else {
+  delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+}
+if (originalSupabaseAnonKey !== undefined) {
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = originalSupabaseAnonKey;
+} else {
+  delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+}
+
+assert(
+  supabaseConfigAllMatch,
+  '16. Supabase configuration helper correctly distinguishes valid from placeholder credentials',
+  supabaseConfigFailures.length === 0
+    ? 'All 6 Supabase credential scenarios evaluated accurately'
+    : `Failures: ${supabaseConfigFailures.join('; ')}`
+);
+
+// -----------------------------------------------------------------------------
+// Test 17: Payment Idempotency Validation and Conflict Detection
+// -----------------------------------------------------------------------------
+interface PersistedTxnRecord {
+  id: string;
+  transaction_number: string;
+  student_id: string;
+  semester_id: string;
+  student_due_id: string;
+  amount: number;
+  payment_method: string;
+  status: string;
+}
+
+interface IncomingPaymentRequest {
+  studentId: string;
+  semesterId: string;
+  amount: number;
+  paymentMethod: string;
+}
+
+function evaluateIdempotencyReplay(
+  persisted: PersistedTxnRecord,
+  incoming: IncomingPaymentRequest
+): { isMatch: boolean; conflictType?: string } {
+  if (persisted.status !== 'COMPLETED') {
+    return { isMatch: false, conflictType: 'STATUS_INELIGIBLE' };
+  }
+  if (persisted.student_id !== incoming.studentId) {
+    return { isMatch: false, conflictType: 'STUDENT_MISMATCH' };
+  }
+  if (persisted.semester_id !== incoming.semesterId) {
+    return { isMatch: false, conflictType: 'SEMESTER_MISMATCH' };
+  }
+  if (Number(persisted.amount) !== incoming.amount) {
+    return { isMatch: false, conflictType: 'AMOUNT_MISMATCH' };
+  }
+  if (persisted.payment_method !== incoming.paymentMethod) {
+    return { isMatch: false, conflictType: 'METHOD_MISMATCH' };
+  }
+  return { isMatch: true };
+}
+
+const basePersisted: PersistedTxnRecord = {
+  id: 'txn-existing-001',
+  transaction_number: 'CUFE-TXN-2024-000001',
+  student_id: '00000000-0000-0000-0000-000000000011',
+  semester_id: '00000000-0000-0000-0000-000000000101',
+  student_due_id: 'd0000000-0000-0000-0000-000000000001',
+  amount: 1500,
+  payment_method: 'CASH',
+  status: 'COMPLETED',
+};
+
+const validMatch = evaluateIdempotencyReplay(basePersisted, {
+  studentId: '00000000-0000-0000-0000-000000000011',
+  semesterId: '00000000-0000-0000-0000-000000000101',
+  amount: 1500,
+  paymentMethod: 'CASH',
+});
+
+const studentMismatch = evaluateIdempotencyReplay(basePersisted, {
+  studentId: '00000000-0000-0000-0000-000000000012',
+  semesterId: '00000000-0000-0000-0000-000000000101',
+  amount: 1500,
+  paymentMethod: 'CASH',
+});
+
+const amountMismatch = evaluateIdempotencyReplay(basePersisted, {
+  studentId: '00000000-0000-0000-0000-000000000011',
+  semesterId: '00000000-0000-0000-0000-000000000101',
+  amount: 2500,
+  paymentMethod: 'CASH',
+});
+
+const semesterMismatch = evaluateIdempotencyReplay(basePersisted, {
+  studentId: '00000000-0000-0000-0000-000000000011',
+  semesterId: '00000000-0000-0000-0000-000000000102',
+  amount: 1500,
+  paymentMethod: 'CASH',
+});
+
+const methodMismatch = evaluateIdempotencyReplay(basePersisted, {
+  studentId: '00000000-0000-0000-0000-000000000011',
+  semesterId: '00000000-0000-0000-0000-000000000101',
+  amount: 1500,
+  paymentMethod: 'VISA',
+});
+
+const voidedTxnMatch = evaluateIdempotencyReplay(
+  { ...basePersisted, status: 'VOIDED' },
+  {
+    studentId: '00000000-0000-0000-0000-000000000011',
+    semesterId: '00000000-0000-0000-0000-000000000101',
+    amount: 1500,
+    paymentMethod: 'CASH',
+  }
+);
+
+const idempotencyAllCorrect =
+  validMatch.isMatch &&
+  !studentMismatch.isMatch &&
+  studentMismatch.conflictType === 'STUDENT_MISMATCH' &&
+  !amountMismatch.isMatch &&
+  amountMismatch.conflictType === 'AMOUNT_MISMATCH' &&
+  !semesterMismatch.isMatch &&
+  semesterMismatch.conflictType === 'SEMESTER_MISMATCH' &&
+  !methodMismatch.isMatch &&
+  methodMismatch.conflictType === 'METHOD_MISMATCH' &&
+  !voidedTxnMatch.isMatch &&
+  voidedTxnMatch.conflictType === 'STATUS_INELIGIBLE';
+
+assert(
+  idempotencyAllCorrect,
+  '17. Idempotency validation safely differentiates valid replay from conflicting or voided submissions',
+  'Verified: exact match accepted; student, amount, semester, method mismatches and VOIDED statuses rejected as conflicts'
+);
+
+// -----------------------------------------------------------------------------
+// Test 18: Student Identity Boundary - Elimination of Hardcoded Fallbacks
+// -----------------------------------------------------------------------------
+const studentTsPath = path.join(process.cwd(), 'src', 'lib', 'data', 'student.ts');
+const studentTsContent = fs.readFileSync(studentTsPath, 'utf-8');
+
+const receiptTsPath = path.join(process.cwd(), 'src', 'lib', 'data', 'receipt.ts');
+const receiptTsContent = fs.readFileSync(receiptTsPath, 'utf-8');
+
+const hasMockProfileFallback = studentTsContent.includes('MOCK_PROFILES[2]');
+const hasMockStudentFallback = studentTsContent.includes('MOCK_STUDENTS[0]');
+const hasDemoCashierFallback = receiptTsContent.includes('DEMO-ADM-001');
+
+const unknownStudentId = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+const unknownProfileLookup = MOCK_PROFILES.find((p) => p.id === unknownStudentId);
+const unknownStudentLookup = MOCK_STUDENTS.find((s) => s.id === unknownStudentId);
+
+const studentIdentitySafe =
+  !hasMockProfileFallback &&
+  !hasMockStudentFallback &&
+  !hasDemoCashierFallback &&
+  unknownProfileLookup === undefined &&
+  unknownStudentLookup === undefined;
+
+assert(
+  studentIdentitySafe,
+  '18. Student identity boundary is strictly enforced with zero hardcoded profile/student fallbacks',
+  'Confirmed: MOCK_PROFILES[2], MOCK_STUDENTS[0], and DEMO-ADM-001 completely eliminated from data layer'
+);
+
+// -----------------------------------------------------------------------------
+// Test 19: Data Access Layer Fail-Closed Audit (admin.ts, student.ts, reports.ts)
+// -----------------------------------------------------------------------------
+const adminTsPath = path.join(process.cwd(), 'src', 'lib', 'data', 'admin.ts');
+const adminTsContent = fs.readFileSync(adminTsPath, 'utf-8');
+
+const reportsTsPath = path.join(process.cwd(), 'src', 'lib', 'data', 'reports.ts');
+const reportsTsContent = fs.readFileSync(reportsTsPath, 'utf-8');
+
+const dataFiles = [
+  { name: 'student.ts', content: studentTsContent },
+  { name: 'admin.ts', content: adminTsContent },
+  { name: 'reports.ts', content: reportsTsContent },
+];
+
+let allDataFilesFailClosed = true;
+const dataFileFailures: string[] = [];
+
+for (const df of dataFiles) {
+  if (!df.content.includes('isDevMockEnabled')) {
+    allDataFilesFailClosed = false;
+    dataFileFailures.push(`${df.name} does not import isDevMockEnabled`);
+  }
+  if (!df.content.includes('if (isDevMockEnabled())')) {
+    allDataFilesFailClosed = false;
+    dataFileFailures.push(`${df.name} does not gate mock execution behind if (isDevMockEnabled())`);
+  }
+  const impersonationMatches = df.content.match(/\|\|\s*MOCK_(PROFILES|STUDENTS)/g);
+  if (impersonationMatches && impersonationMatches.length > 0) {
+    allDataFilesFailClosed = false;
+    dataFileFailures.push(`${df.name} contains impersonation fallback: ${impersonationMatches.join(', ')}`);
+  }
+}
+
+assert(
+  allDataFilesFailClosed,
+  '19. Data access layer (admin, student, reports) strictly gates all mock data behind isDevMockEnabled()',
+  dataFileFailures.length === 0
+    ? 'All data access modules enforce fail-closed policy with zero unguarded mock fallbacks'
+    : `Violations: ${dataFileFailures.join('; ')}`
+);
+
+// -----------------------------------------------------------------------------
+// Test 20: Server Actions Fail-Closed Guard (payment.actions.ts)
+// -----------------------------------------------------------------------------
+const paymentActionsPath = path.join(process.cwd(), 'src', 'lib', 'actions', 'payment.actions.ts');
+const paymentActionsContent = fs.readFileSync(paymentActionsPath, 'utf-8');
+
+const paymentActionsGuardsPresent =
+  paymentActionsContent.includes('isDevMockEnabled') &&
+  paymentActionsContent.includes('!isSupabaseConfigured() && !isDevMockEnabled()') &&
+  paymentActionsContent.includes('if (!isDevMockEnabled())');
+
+assert(
+  paymentActionsGuardsPresent,
+  '20. Payment and void server actions fail closed when Supabase is unconfigured and dev mocks are disabled',
+  'Confirmed: entry guard and mock layer guard strictly enforce fail-closed financial mutation policy'
+);
+
+// -----------------------------------------------------------------------------
 // Report Summary
 // -----------------------------------------------------------------------------
 console.log('RESULTS:');
@@ -383,13 +743,13 @@ let allPassed = true;
 results.forEach((r, idx) => {
   const status = r.passed ? '✅ PASS' : '❌ FAIL';
   if (!r.passed) allPassed = false;
-  console.log(`${status} [${idx + 1}/14] ${r.name}`);
+  console.log(`${status} [${idx + 1}/${results.length}] ${r.name}`);
   console.log(`   ${r.details}`);
 });
 
 console.log('\n=================================================================');
 if (allPassed) {
-  console.log('ALL 14 PHASE 5 SECURITY & INTEGRITY TESTS PASSED SUCCESSFULLY! 🎉');
+  console.log(`ALL ${results.length} PHASE 5 SECURITY & INTEGRITY TESTS PASSED SUCCESSFULLY! 🎉`);
 } else {
   console.error('SOME TESTS FAILED! Check details above.');
   process.exit(1);

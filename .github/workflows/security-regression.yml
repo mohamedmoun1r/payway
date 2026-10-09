@@ -11,7 +11,7 @@ on:
       - 'src/lib/actions/payment.actions.ts'
       - 'scripts/test-phase5-security.ts'
       - 'src/lib/validations/payment.schema.ts'
-      - 'src/lib/data/mock-data.ts'
+      - 'src/lib/data/**'
       - '.github/workflows/security-regression.yml'
   workflow_dispatch:
 

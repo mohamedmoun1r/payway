@@ -620,3 +620,29 @@ export const MOCK_AUDIT_LOGS: AuditLogRow[] = [
     created_at: '2024-10-04T14:25:00Z',
   },
 ];
+
+/**
+ * Determines whether mock/demo data is permitted in the current runtime environment.
+ * Strictly adheres to the approved fail-closed policy:
+ * - Returns true only when NODE_ENV === 'development' AND ENABLE_DEV_MOCKS === 'true' (exact string).
+ * - Returns false in production, test, preview, and all other environments.
+ * - Truthy values such as "1", "yes", "TRUE" are strictly rejected.
+ */
+export function isDevMockEnabled(): boolean {
+  return process.env.NODE_ENV === 'development' && process.env.ENABLE_DEV_MOCKS === 'true';
+}
+
+/**
+ * Checks whether remote Supabase credentials are configured.
+ */
+export function isSupabaseConfigured(): boolean {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  return Boolean(
+    url &&
+    anonKey &&
+    !url.includes('placeholder-project') &&
+    !url.includes('your-project-id') &&
+    anonKey !== 'placeholder-anon-key'
+  );
+}

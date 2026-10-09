@@ -23,6 +23,8 @@ import {
   MOCK_TRANSACTIONS,
   MOCK_RECEIPTS,
   MOCK_AUDIT_LOGS,
+  isDevMockEnabled,
+  isSupabaseConfigured,
 } from '@/lib/data/mock-data';
 import type { Locale } from '@/lib/i18n/config';
 import type { Database } from '@/types/database.types';
@@ -60,11 +62,6 @@ export interface VoidActionResult {
     voidedAt: string;
     status: 'VOIDED';
   };
-}
-
-function isSupabaseConfigured(): boolean {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  return Boolean(url && !url.includes('placeholder-project') && !url.includes('your-project-id'));
 }
 
 /**
@@ -146,9 +143,9 @@ export async function recordManualPaymentAction(
 
   const validated = parseResult.data;
 
-  // 3. Fail closed in production if financial persistence or receipt signing is misconfigured.
-  // Demo/mock financial writes are permitted only outside production.
-  if (process.env.NODE_ENV === 'production' && !isSupabaseConfigured()) {
+  // 3. Fail closed if financial persistence or receipt signing is misconfigured.
+  // Demo/mock financial writes are permitted only when explicitly enabled in development.
+  if (!isSupabaseConfigured() && !isDevMockEnabled()) {
     return {
       success: false,
       error: isAr
@@ -182,11 +179,14 @@ export async function recordManualPaymentAction(
       const supabase = await createClient();
 
       // 4.1 Check Idempotency: Has this transaction already been recorded?
-      const { data: existingTxn } = await supabase
+      const { data: existingTxn, error: idempotencyLookupError } = await supabase
         .from('transactions')
         .select(`
           id,
           transaction_number,
+          student_id,
+          semester_id,
+          student_due_id,
           amount,
           payment_method,
           payment_date,
@@ -202,6 +202,16 @@ export async function recordManualPaymentAction(
         .eq('idempotency_key', validated.idempotencyKey)
         .maybeSingle();
 
+      if (idempotencyLookupError) {
+        console.error('[IDEMPOTENCY_LOOKUP_ERROR]', idempotencyLookupError);
+        return {
+          success: false,
+          error: isAr
+            ? 'حدث خطأ أثناء التحقق من تكرار العملية. يرجى إعادة المحاولة.'
+            : 'Error verifying transaction idempotency. Please retry.',
+        };
+      }
+
       if (existingTxn) {
         type RawExistingTxn = typeof existingTxn & {
           receipt?: { id: string; receipt_number: string }[];
@@ -212,6 +222,24 @@ export async function recordManualPaymentAction(
           student_due?: { original_amount: number; discount_amount: number; paid_amount: number };
         };
         const raw = existingTxn as unknown as RawExistingTxn;
+
+        // Verify that the persisted transaction matches the requested parameters
+        const isMatch =
+          raw.student_id === validated.studentId &&
+          raw.semester_id === validated.semesterId &&
+          Number(raw.amount) === validated.amount &&
+          raw.payment_method === validated.paymentMethod &&
+          raw.status === 'COMPLETED';
+
+        if (!isMatch) {
+          return {
+            success: false,
+            error: isAr
+              ? 'تعارض في مفتاح منع التكرار: تم استخدام هذا المفتاح مسبقاً مع بيانات سداد مختلفة أو لمعاملة غير مؤهلة.'
+              : 'Idempotency conflict: The provided idempotency key was previously used with different parameters or for an ineligible transaction.',
+          };
+        }
+
         const receipt = raw.receipt?.[0];
         const remBal = raw.student_due
           ? Math.max(
@@ -229,7 +257,7 @@ export async function recordManualPaymentAction(
             receiptId: receipt?.id || '',
             transactionNumber: raw.transaction_number,
             receiptNumber: receipt?.receipt_number || '',
-            studentId: validated.studentId,
+            studentId: raw.student_id,
             studentNameAr: raw.student?.profile?.full_name_ar || '',
             studentNameEn: raw.student?.profile?.full_name_en || '',
             studentNumber: raw.student?.student_number || '',
@@ -273,36 +301,94 @@ export async function recordManualPaymentAction(
         }
         if (errorMsg.includes('DUPLICATE_SUBMISSION')) {
           // Idempotency collision during concurrent execution; retry lookup
-          const { data: retryTxn } = await supabase
+          const { data: retryTxn, error: retryErr } = await supabase
             .from('transactions')
-            .select('id, transaction_number, amount, payment_method, payment_date, payment_time, status, receipts(id, receipt_number)')
+            .select(`
+              id,
+              transaction_number,
+              student_id,
+              semester_id,
+              student_due_id,
+              amount,
+              payment_method,
+              payment_date,
+              payment_time,
+              status,
+              receipt:receipts(id, receipt_number),
+              student:students!inner(
+                student_number,
+                profile:profiles!inner(full_name_ar, full_name_en)
+              ),
+              student_due:student_dues!inner(original_amount, discount_amount, paid_amount)
+            `)
             .eq('idempotency_key', validated.idempotencyKey)
             .maybeSingle();
 
-          if (retryTxn) {
-            type RawRetry = typeof retryTxn & { receipts?: { id: string; receipt_number: string }[] };
-            const rawRetry = retryTxn as unknown as RawRetry;
+          if (retryErr || !retryTxn) {
             return {
-              success: true,
-              data: {
-                transactionId: rawRetry.id,
-                receiptId: rawRetry.receipts?.[0]?.id || '',
-                transactionNumber: rawRetry.transaction_number,
-                receiptNumber: rawRetry.receipts?.[0]?.receipt_number || '',
-                studentId: validated.studentId,
-                studentNameAr: '',
-                studentNameEn: '',
-                studentNumber: '',
-                amount: Number(rawRetry.amount),
-                paymentMethod: rawRetry.payment_method,
-                paymentDate: rawRetry.payment_date,
-                paymentTime: rawRetry.payment_time,
-                newRemainingBalance: 0,
-                status: rawRetry.status,
-                isDuplicate: true,
-              },
+              success: false,
+              error: isAr
+                ? 'تم تسجيل معاملة مسبقاً بهذا المفتاح ولكن تعذر استرجاع بياناتها.'
+                : 'A duplicate transaction was detected, but its details could not be retrieved.',
             };
           }
+
+          type RawRetry = typeof retryTxn & {
+            receipt?: { id: string; receipt_number: string }[];
+            student?: {
+              student_number: string;
+              profile?: { full_name_ar: string; full_name_en: string };
+            };
+            student_due?: { original_amount: number; discount_amount: number; paid_amount: number };
+          };
+          const rawRetry = retryTxn as unknown as RawRetry;
+
+          const isRetryMatch =
+            rawRetry.student_id === validated.studentId &&
+            rawRetry.semester_id === validated.semesterId &&
+            Number(rawRetry.amount) === validated.amount &&
+            rawRetry.payment_method === validated.paymentMethod &&
+            rawRetry.status === 'COMPLETED';
+
+          if (!isRetryMatch) {
+            return {
+              success: false,
+              error: isAr
+                ? 'تعارض في مفتاح منع التكرار: تم استخدام هذا المفتاح مسبقاً مع بيانات سداد مختلفة أو لمعاملة غير مؤهلة.'
+                : 'Idempotency conflict: The provided idempotency key was previously used with different parameters or for an ineligible transaction.',
+            };
+          }
+
+          const receipt = rawRetry.receipt?.[0];
+          const remBal = rawRetry.student_due
+            ? Math.max(
+                0,
+                Number(rawRetry.student_due.original_amount) -
+                  Number(rawRetry.student_due.discount_amount) -
+                  Number(rawRetry.student_due.paid_amount)
+              )
+            : 0;
+
+          return {
+            success: true,
+            data: {
+              transactionId: rawRetry.id,
+              receiptId: receipt?.id || '',
+              transactionNumber: rawRetry.transaction_number,
+              receiptNumber: receipt?.receipt_number || '',
+              studentId: rawRetry.student_id,
+              studentNameAr: rawRetry.student?.profile?.full_name_ar || '',
+              studentNameEn: rawRetry.student?.profile?.full_name_en || '',
+              studentNumber: rawRetry.student?.student_number || '',
+              amount: Number(rawRetry.amount),
+              paymentMethod: rawRetry.payment_method,
+              paymentDate: rawRetry.payment_date,
+              paymentTime: rawRetry.payment_time,
+              newRemainingBalance: remBal,
+              status: rawRetry.status,
+              isDuplicate: true,
+            },
+          };
         }
         if (errorMsg.includes('DUE_NOT_FOUND')) {
           return {
@@ -406,8 +492,8 @@ export async function recordManualPaymentAction(
     }
   }
 
-  // Production must never report success from an in-memory mock dataset.
-  if (process.env.NODE_ENV === 'production') {
+  // Mock dataset is permitted only when explicit development flag is active.
+  if (!isDevMockEnabled()) {
     return {
       success: false,
       error: isAr
@@ -426,6 +512,22 @@ export async function recordManualPaymentAction(
   );
 
   if (existingMockTxn) {
+    const isMockMatch =
+      existingMockTxn.student_id === validated.studentId &&
+      existingMockTxn.semester_id === validated.semesterId &&
+      Number(existingMockTxn.amount) === validated.amount &&
+      existingMockTxn.payment_method === validated.paymentMethod &&
+      existingMockTxn.status === 'COMPLETED';
+
+    if (!isMockMatch) {
+      return {
+        success: false,
+        error: isAr
+          ? 'تعارض في مفتاح منع التكرار: تم استخدام هذا المفتاح مسبقاً مع بيانات سداد مختلفة أو لمعاملة غير مؤهلة.'
+          : 'Idempotency conflict: The provided idempotency key was previously used with different parameters or for an ineligible transaction.',
+      };
+    }
+
     const rcp = MOCK_RECEIPTS.find((r) => r.transaction_id === existingMockTxn.id);
     const stu = MOCK_STUDENTS.find((s) => s.id === existingMockTxn.student_id);
     const prof = MOCK_PROFILES.find((p) => p.id === existingMockTxn.student_id);
@@ -639,8 +741,8 @@ export async function voidTransactionAction(
 
   const { transactionId, voidReason } = parseResult.data;
 
-  // 3. Production must never perform a financial void against mock in-memory data.
-  if (process.env.NODE_ENV === 'production' && !isSupabaseConfigured()) {
+  // 3. Mock financial void is permitted only when explicitly enabled in development.
+  if (!isSupabaseConfigured() && !isDevMockEnabled()) {
     return {
       success: false,
       error: isAr
@@ -751,8 +853,8 @@ export async function voidTransactionAction(
     }
   }
 
-  // Production must never fall through to mock transaction state.
-  if (process.env.NODE_ENV === 'production') {
+  // Mock dataset fallback is permitted only when explicit development flag is active.
+  if (!isDevMockEnabled()) {
     return {
       success: false,
       error: isAr
