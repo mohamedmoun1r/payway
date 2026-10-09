@@ -48,6 +48,7 @@ import {
   isDevMockEnabled,
   isSupabaseConfigured,
 } from '../src/lib/data/mock-data';
+import { validateIdempotencyReplay } from '../src/lib/actions/payment-idempotency';
 
 interface TestResult {
   name: string;
@@ -531,47 +532,8 @@ assert(
 // -----------------------------------------------------------------------------
 // Test 17: Payment Idempotency Validation and Conflict Detection
 // -----------------------------------------------------------------------------
-interface PersistedTxnRecord {
-  id: string;
-  transaction_number: string;
-  student_id: string;
-  semester_id: string;
-  student_due_id: string;
-  amount: number;
-  payment_method: string;
-  status: string;
-}
-
-interface IncomingPaymentRequest {
-  studentId: string;
-  semesterId: string;
-  amount: number;
-  paymentMethod: string;
-}
-
-function evaluateIdempotencyReplay(
-  persisted: PersistedTxnRecord,
-  incoming: IncomingPaymentRequest
-): { isMatch: boolean; conflictType?: string } {
-  if (persisted.status !== 'COMPLETED') {
-    return { isMatch: false, conflictType: 'STATUS_INELIGIBLE' };
-  }
-  if (persisted.student_id !== incoming.studentId) {
-    return { isMatch: false, conflictType: 'STUDENT_MISMATCH' };
-  }
-  if (persisted.semester_id !== incoming.semesterId) {
-    return { isMatch: false, conflictType: 'SEMESTER_MISMATCH' };
-  }
-  if (Number(persisted.amount) !== incoming.amount) {
-    return { isMatch: false, conflictType: 'AMOUNT_MISMATCH' };
-  }
-  if (persisted.payment_method !== incoming.paymentMethod) {
-    return { isMatch: false, conflictType: 'METHOD_MISMATCH' };
-  }
-  return { isMatch: true };
-}
-
-const basePersisted: PersistedTxnRecord = {
+// Exercises the shared server-side helper validateIdempotencyReplay directly.
+const basePersisted = {
   id: 'txn-existing-001',
   transaction_number: 'CUFE-TXN-2024-000001',
   student_id: '00000000-0000-0000-0000-000000000011',
@@ -582,43 +544,102 @@ const basePersisted: PersistedTxnRecord = {
   status: 'COMPLETED',
 };
 
-const validMatch = evaluateIdempotencyReplay(basePersisted, {
+const validMatch = validateIdempotencyReplay(basePersisted, {
   studentId: '00000000-0000-0000-0000-000000000011',
   semesterId: '00000000-0000-0000-0000-000000000101',
   amount: 1500,
   paymentMethod: 'CASH',
 });
 
-const studentMismatch = evaluateIdempotencyReplay(basePersisted, {
+const studentMismatch = validateIdempotencyReplay(basePersisted, {
   studentId: '00000000-0000-0000-0000-000000000012',
   semesterId: '00000000-0000-0000-0000-000000000101',
   amount: 1500,
   paymentMethod: 'CASH',
 });
 
-const amountMismatch = evaluateIdempotencyReplay(basePersisted, {
+const amountMismatch = validateIdempotencyReplay(basePersisted, {
   studentId: '00000000-0000-0000-0000-000000000011',
   semesterId: '00000000-0000-0000-0000-000000000101',
   amount: 2500,
   paymentMethod: 'CASH',
 });
 
-const semesterMismatch = evaluateIdempotencyReplay(basePersisted, {
+const semesterMismatch = validateIdempotencyReplay(basePersisted, {
   studentId: '00000000-0000-0000-0000-000000000011',
   semesterId: '00000000-0000-0000-0000-000000000102',
   amount: 1500,
   paymentMethod: 'CASH',
 });
 
-const methodMismatch = evaluateIdempotencyReplay(basePersisted, {
+const methodMismatch = validateIdempotencyReplay(basePersisted, {
   studentId: '00000000-0000-0000-0000-000000000011',
   semesterId: '00000000-0000-0000-0000-000000000101',
   amount: 1500,
   paymentMethod: 'VISA',
 });
 
-const voidedTxnMatch = evaluateIdempotencyReplay(
+const voidedTxnMatch = validateIdempotencyReplay(
   { ...basePersisted, status: 'VOIDED' },
+  {
+    studentId: '00000000-0000-0000-0000-000000000011',
+    semesterId: '00000000-0000-0000-0000-000000000101',
+    amount: 1500,
+    paymentMethod: 'CASH',
+  }
+);
+
+// Regression check for student-due ID matching scenarios
+// 1. Matching due IDs are accepted
+const dueMatch = validateIdempotencyReplay(basePersisted, {
+  studentId: '00000000-0000-0000-0000-000000000011',
+  semesterId: '00000000-0000-0000-0000-000000000101',
+  amount: 1500,
+  paymentMethod: 'CASH',
+  studentDueId: 'd0000000-0000-0000-0000-000000000001',
+});
+
+// 2. Different due IDs are rejected
+const dueMismatch = validateIdempotencyReplay(basePersisted, {
+  studentId: '00000000-0000-0000-0000-000000000011',
+  semesterId: '00000000-0000-0000-0000-000000000101',
+  amount: 1500,
+  paymentMethod: 'CASH',
+  studentDueId: 'd9999999-9999-9999-9999-999999999999',
+});
+
+// 3. An incoming due ID with a persisted student_due_id: null is rejected
+const dueNullMismatch = validateIdempotencyReplay(
+  { ...basePersisted, student_due_id: null },
+  {
+    studentId: '00000000-0000-0000-0000-000000000011',
+    semesterId: '00000000-0000-0000-0000-000000000101',
+    amount: 1500,
+    paymentMethod: 'CASH',
+    studentDueId: 'd0000000-0000-0000-0000-000000000001',
+  }
+);
+
+// 4. An incoming due ID with a missing persisted student_due_id is rejected
+const { student_due_id: _removedDueId, ...persistedWithoutDueId } = basePersisted;
+const dueMissingMismatch = validateIdempotencyReplay(persistedWithoutDueId, {
+  studentId: '00000000-0000-0000-0000-000000000011',
+  semesterId: '00000000-0000-0000-0000-000000000101',
+  amount: 1500,
+  paymentMethod: 'CASH',
+  studentDueId: 'd0000000-0000-0000-0000-000000000001',
+});
+
+// 5. When incoming.studentDueId is omitted, existing behavior remains unchanged
+const dueOmittedMatch = validateIdempotencyReplay(basePersisted, {
+  studentId: '00000000-0000-0000-0000-000000000011',
+  semesterId: '00000000-0000-0000-0000-000000000101',
+  amount: 1500,
+  paymentMethod: 'CASH',
+});
+
+const dueOmittedWithNullPersistedMatch = validateIdempotencyReplay(
+  { ...basePersisted, student_due_id: null },
   {
     studentId: '00000000-0000-0000-0000-000000000011',
     semesterId: '00000000-0000-0000-0000-000000000101',
@@ -629,21 +650,34 @@ const voidedTxnMatch = evaluateIdempotencyReplay(
 
 const idempotencyAllCorrect =
   validMatch.isMatch &&
+  validMatch.mismatchReason === undefined &&
   !studentMismatch.isMatch &&
-  studentMismatch.conflictType === 'STUDENT_MISMATCH' &&
+  studentMismatch.mismatchReason === 'STUDENT_MISMATCH' &&
   !amountMismatch.isMatch &&
-  amountMismatch.conflictType === 'AMOUNT_MISMATCH' &&
+  amountMismatch.mismatchReason === 'AMOUNT_MISMATCH' &&
   !semesterMismatch.isMatch &&
-  semesterMismatch.conflictType === 'SEMESTER_MISMATCH' &&
+  semesterMismatch.mismatchReason === 'SEMESTER_MISMATCH' &&
   !methodMismatch.isMatch &&
-  methodMismatch.conflictType === 'METHOD_MISMATCH' &&
+  methodMismatch.mismatchReason === 'METHOD_MISMATCH' &&
   !voidedTxnMatch.isMatch &&
-  voidedTxnMatch.conflictType === 'STATUS_INELIGIBLE';
+  voidedTxnMatch.mismatchReason === 'STATUS_INELIGIBLE' &&
+  dueMatch.isMatch &&
+  dueMatch.mismatchReason === undefined &&
+  !dueMismatch.isMatch &&
+  dueMismatch.mismatchReason === 'STUDENT_DUE_MISMATCH' &&
+  !dueNullMismatch.isMatch &&
+  dueNullMismatch.mismatchReason === 'STUDENT_DUE_MISMATCH' &&
+  !dueMissingMismatch.isMatch &&
+  dueMissingMismatch.mismatchReason === 'STUDENT_DUE_MISMATCH' &&
+  dueOmittedMatch.isMatch &&
+  dueOmittedMatch.mismatchReason === undefined &&
+  dueOmittedWithNullPersistedMatch.isMatch &&
+  dueOmittedWithNullPersistedMatch.mismatchReason === undefined;
 
 assert(
   idempotencyAllCorrect,
   '17. Idempotency validation safely differentiates valid replay from conflicting or voided submissions',
-  'Verified: exact match accepted; student, amount, semester, method mismatches and VOIDED statuses rejected as conflicts'
+  'Verified via shared validateIdempotencyReplay helper: exact match accepted; student, amount, semester, method, and all due mismatch variations (different, null, missing) rejected; omitted due ID unchanged'
 );
 
 // -----------------------------------------------------------------------------

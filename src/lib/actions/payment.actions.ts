@@ -26,6 +26,7 @@ import {
   isDevMockEnabled,
   isSupabaseConfigured,
 } from '@/lib/data/mock-data';
+import { validateIdempotencyReplay } from './payment-idempotency';
 import type { Locale } from '@/lib/i18n/config';
 import type { Database } from '@/types/database.types';
 
@@ -223,15 +224,9 @@ export async function recordManualPaymentAction(
         };
         const raw = existingTxn as unknown as RawExistingTxn;
 
-        // Verify that the persisted transaction matches the requested parameters
-        const isMatch =
-          raw.student_id === validated.studentId &&
-          raw.semester_id === validated.semesterId &&
-          Number(raw.amount) === validated.amount &&
-          raw.payment_method === validated.paymentMethod &&
-          raw.status === 'COMPLETED';
-
-        if (!isMatch) {
+        // Verify that the persisted transaction matches the requested parameters using shared helper
+        const replayValidation = validateIdempotencyReplay(raw, validated);
+        if (!replayValidation.isMatch) {
           return {
             success: false,
             error: isAr
@@ -343,14 +338,8 @@ export async function recordManualPaymentAction(
           };
           const rawRetry = retryTxn as unknown as RawRetry;
 
-          const isRetryMatch =
-            rawRetry.student_id === validated.studentId &&
-            rawRetry.semester_id === validated.semesterId &&
-            Number(rawRetry.amount) === validated.amount &&
-            rawRetry.payment_method === validated.paymentMethod &&
-            rawRetry.status === 'COMPLETED';
-
-          if (!isRetryMatch) {
+          const retryValidation = validateIdempotencyReplay(rawRetry, validated);
+          if (!retryValidation.isMatch) {
             return {
               success: false,
               error: isAr
@@ -512,14 +501,8 @@ export async function recordManualPaymentAction(
   );
 
   if (existingMockTxn) {
-    const isMockMatch =
-      existingMockTxn.student_id === validated.studentId &&
-      existingMockTxn.semester_id === validated.semesterId &&
-      Number(existingMockTxn.amount) === validated.amount &&
-      existingMockTxn.payment_method === validated.paymentMethod &&
-      existingMockTxn.status === 'COMPLETED';
-
-    if (!isMockMatch) {
+    const mockValidation = validateIdempotencyReplay(existingMockTxn, validated);
+    if (!mockValidation.isMatch) {
       return {
         success: false,
         error: isAr
