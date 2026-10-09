@@ -1,6 +1,9 @@
 name: Security Regression Tests
 
 on:
+  push:
+    branches:
+      - 'security/**'
   pull_request:
     branches: [master]
     paths:
