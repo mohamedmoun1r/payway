@@ -12,6 +12,7 @@ on:
       - 'scripts/test-phase5-security.ts'
       - 'src/lib/validations/payment.schema.ts'
       - 'src/lib/data/**'
+      - 'supabase/**'
       - '.github/workflows/security-regression.yml'
   workflow_dispatch:
 
@@ -41,3 +42,106 @@ jobs:
           NODE_ENV: test
           RECEIPT_HMAC_SECRET: payway-ci-only-test-secret-not-for-production
         run: npm run test:security
+
+  postgres-security-tests:
+    name: PostgreSQL security regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: 2.120.0
+
+      - name: Start local Supabase stack
+        run: |
+          supabase start -x studio,mailpit,vector,logflare,edge-runtime,storage-api,realtime
+
+      - name: Run SQL security regression suite
+        run: |
+          docker exec -i supabase_db_payway psql -U postgres -d postgres -v ON_ERROR_STOP=1 < supabase/tests/test_void_transaction_role_check.sql
+
+      - name: Verify zero residual test fixtures after rollback
+        run: |
+          docker exec -i supabase_db_payway psql -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          DO $$
+          DECLARE
+            v_users INT;
+            v_profiles INT;
+            v_admins INT;
+            v_students INT;
+            v_semesters INT;
+            v_dues INT;
+            v_txns INT;
+            v_audits INT;
+          BEGIN
+            SELECT COUNT(*) INTO v_users FROM auth.users WHERE id IN (
+              'a7777777-0000-0000-0000-000000000001'::uuid,
+              'a7777777-0000-0000-0000-000000000002'::uuid,
+              'a7777777-0000-0000-0000-000000000003'::uuid,
+              'a7777777-0000-0000-0000-000000000004'::uuid,
+              'a7777777-0000-0000-0000-000000000005'::uuid,
+              'a7777777-0000-0000-0000-000000000006'::uuid,
+              'b7777777-0000-0000-0000-000000000001'::uuid,
+              'b7777777-0000-0000-0000-000000000002'::uuid,
+              'b7777777-0000-0000-0000-000000000003'::uuid
+            );
+
+            SELECT COUNT(*) INTO v_profiles FROM public.profiles WHERE id IN (
+              'a7777777-0000-0000-0000-000000000001'::uuid,
+              'a7777777-0000-0000-0000-000000000002'::uuid,
+              'a7777777-0000-0000-0000-000000000003'::uuid,
+              'a7777777-0000-0000-0000-000000000004'::uuid,
+              'a7777777-0000-0000-0000-000000000005'::uuid,
+              'a7777777-0000-0000-0000-000000000006'::uuid,
+              'b7777777-0000-0000-0000-000000000001'::uuid,
+              'b7777777-0000-0000-0000-000000000002'::uuid,
+              'b7777777-0000-0000-0000-000000000003'::uuid
+            );
+
+            SELECT COUNT(*) INTO v_admins FROM public.admins WHERE id IN (
+              'a7777777-0000-0000-0000-000000000001'::uuid,
+              'a7777777-0000-0000-0000-000000000002'::uuid,
+              'a7777777-0000-0000-0000-000000000003'::uuid,
+              'a7777777-0000-0000-0000-000000000004'::uuid,
+              'a7777777-0000-0000-0000-000000000005'::uuid,
+              'a7777777-0000-0000-0000-000000000006'::uuid
+            );
+
+            SELECT COUNT(*) INTO v_students FROM public.students WHERE id IN (
+              'b7777777-0000-0000-0000-000000000001'::uuid,
+              'b7777777-0000-0000-0000-000000000002'::uuid,
+              'b7777777-0000-0000-0000-000000000003'::uuid
+            );
+
+            SELECT COUNT(*) INTO v_semesters FROM public.semesters WHERE id = 'e1111111-0000-0000-0000-000000000001'::uuid;
+
+            SELECT COUNT(*) INTO v_dues FROM public.student_dues WHERE id IN (
+              'd7777777-0000-0000-0000-000000000001'::uuid,
+              'd7777777-0000-0000-0000-000000000002'::uuid,
+              'd7777777-0000-0000-0000-000000000003'::uuid
+            );
+
+            SELECT COUNT(*) INTO v_txns FROM public.transactions WHERE id IN (
+              'c7777777-0000-0000-0000-000000000001'::uuid,
+              'c7777777-0000-0000-0000-000000000002'::uuid,
+              'c7777777-0000-0000-0000-000000000003'::uuid
+            );
+
+            SELECT COUNT(*) INTO v_audits FROM public.audit_logs WHERE entity_id IN (
+              'c7777777-0000-0000-0000-000000000001',
+              'c7777777-0000-0000-0000-000000000002',
+              'c7777777-0000-0000-0000-000000000003'
+            );
+
+            IF v_users > 0 OR v_profiles > 0 OR v_admins > 0 OR v_students > 0 OR v_semesters > 0 OR v_dues > 0 OR v_txns > 0 OR v_audits > 0 THEN
+              RAISE EXCEPTION 'ROLLBACK VERIFICATION FAILED: Residual rows detected (users: %, profiles: %, admins: %, students: %, semesters: %, dues: %, txns: %, audits: %)',
+                v_users, v_profiles, v_admins, v_students, v_semesters, v_dues, v_txns, v_audits;
+            END IF;
+
+            RAISE NOTICE 'ROLLBACK VERIFICATION PASSED: Zero residual test fixtures detected across all fixture tables.';
+          END $$;
+          EOF
