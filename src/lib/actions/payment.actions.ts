@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { requireAdmin, requireAdminWithVoidPermission } from '@/lib/auth/guards';
 import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 import {
   manualPaymentSchema,
   type ManualPaymentInput,
@@ -245,7 +246,8 @@ export async function recordManualPaymentAction(
       }
 
       // 4.2 Execute atomic PostgreSQL function
-      const { data, error } = await supabase.rpc('record_manual_payment_atomic', {
+      const adminClient = createAdminClient();
+      const { data, error } = await adminClient.rpc('record_manual_payment_atomic', {
         p_student_id: validated.studentId,
         p_semester_id: validated.semesterId,
         p_amount: validated.amount,
