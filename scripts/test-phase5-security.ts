@@ -55,6 +55,7 @@ import {
   buildMissingReceiptReplayError,
 } from '../src/lib/actions/payment-idempotency';
 import { evaluateVoidCallerAuthorization } from '../src/lib/auth/void-authorization';
+import { filterStudentSearchResults, type AdminStudentSearchResult } from '../src/lib/data/admin';
 
 interface TestResult {
   name: string;
@@ -1147,6 +1148,56 @@ assert(
   voidAuthorizationAllCorrect,
   '27. Database-level void authorization strictly enforces administrative role, active profile, and void permission',
   'Confirmed: STUDENT with can_void_payments rejected; active admin/superadmin with permission accepted; superadmin without permission rejected (least privilege); inactive account rejected; anti-spoofing verified; SQL and application guard alignment confirmed'
+);
+
+// -----------------------------------------------------------------------------
+// Test 28: Student Search Filtering across Student Number, Names, and Email
+// -----------------------------------------------------------------------------
+const searchSample: AdminStudentSearchResult[] = [
+  {
+    id: 's-101',
+    studentNumber: 'DEMO-100001',
+    nameAr: 'أحمد محمود علي',
+    nameEn: 'Ahmed Mahmoud Ali',
+    email: 'demo.student1@eng.cu.edu.eg',
+    department: 'Computer & Systems Engineering',
+    level: 3,
+    currentSemesterDue: 15000,
+    currentSemesterPaid: 10000,
+    outstandingBalance: 5000,
+    status: 'PARTIALLY_PAID',
+  },
+  {
+    id: 's-102',
+    studentNumber: 'DEMO-100002',
+    nameAr: 'سارة حسن إبراهيم',
+    nameEn: 'Sara Hassan Ibrahim',
+    email: 'demo.student2@eng.cu.edu.eg',
+    department: 'Architectural Engineering',
+    level: 4,
+    currentSemesterDue: 12000,
+    currentSemesterPaid: 12000,
+    outstandingBalance: 0,
+    status: 'PAID',
+  },
+];
+
+const matchNumber = filterStudentSearchResults(searchSample, '100001').length === 1;
+const matchArabic = filterStudentSearchResults(searchSample, 'أحمد').length === 1;
+const matchEnglish = filterStudentSearchResults(searchSample, 'sara').length === 1;
+const matchEmail = filterStudentSearchResults(searchSample, 'demo.student1@eng.cu.edu.eg').length === 1;
+const matchEmpty =
+  filterStudentSearchResults(searchSample, '').length === 2 &&
+  filterStudentSearchResults(searchSample, undefined).length === 2 &&
+  filterStudentSearchResults(searchSample, '   ').length === 2;
+const matchNone = filterStudentSearchResults(searchSample, 'nonexistent').length === 0;
+
+const searchFilterAllCorrect = matchNumber && matchArabic && matchEnglish && matchEmail && matchEmpty && matchNone;
+
+assert(
+  searchFilterAllCorrect,
+  '28. Student search accurately matches student number, Arabic name, English name, and email without invalid PostgREST joins',
+  'Confirmed: matches by number, Arabic name, English name, and email; handles empty query (returns all) and non-matching query (returns empty)'
 );
 
 // -----------------------------------------------------------------------------
