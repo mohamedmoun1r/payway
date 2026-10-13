@@ -217,6 +217,24 @@ export async function getAdminDashboardMetrics(): Promise<AdminDashboardMetrics>
 }
 
 /**
+ * In-memory search matcher for students across student number, Arabic/English names, and email.
+ */
+export function filterStudentSearchResults(
+  students: AdminStudentSearchResult[],
+  query?: string
+): AdminStudentSearchResult[] {
+  const normalizedQuery = (query || '').trim().toLowerCase();
+  if (!normalizedQuery) return students;
+
+  return students.filter((s) =>
+    s.studentNumber.toLowerCase().includes(normalizedQuery) ||
+    s.nameAr.toLowerCase().includes(normalizedQuery) ||
+    s.nameEn.toLowerCase().includes(normalizedQuery) ||
+    s.email.toLowerCase().includes(normalizedQuery)
+  );
+}
+
+/**
  * Searches students by student number, name, or email.
  * Fails closed: Never falls back to mock data unless isDevMockEnabled() is explicitly true.
  */
@@ -225,7 +243,7 @@ export async function searchStudents(query?: string): Promise<AdminStudentSearch
 
   if (isSupabaseConfigured()) {
     const supabase = await createClient();
-    let req = supabase.from('students').select(`
+    const req = supabase.from('students').select(`
       id,
       student_number,
       academic_department,
@@ -234,19 +252,13 @@ export async function searchStudents(query?: string): Promise<AdminStudentSearch
       dues:student_dues(*)
     `);
 
-    if (normalizedQuery) {
-      req = req.or(
-        `student_number.ilike.%${normalizedQuery}%,profile.full_name_ar.ilike.%${normalizedQuery}%,profile.full_name_en.ilike.%${normalizedQuery}%,profile.email.ilike.%${normalizedQuery}%`
-      );
-    }
-
     const { data, error } = await req;
     if (error) {
       throw new Error(`Failed to search students: ${error.message}`);
     }
 
     const rawItems = (data || []) as unknown as RawStudentSearchItem[];
-    return rawItems.map((item) => {
+    const items: AdminStudentSearchResult[] = rawItems.map((item) => {
       const dues = item.dues || [];
       let totalDue = 0;
       let totalPaid = 0;
@@ -270,10 +282,12 @@ export async function searchStudents(query?: string): Promise<AdminStudentSearch
         status: remaining === 0 && totalPaid > 0 ? 'PAID' : totalPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID',
       };
     });
+
+    return filterStudentSearchResults(items, normalizedQuery);
   }
 
   if (isDevMockEnabled()) {
-    return MOCK_STUDENTS.map((student) => {
+    const items: AdminStudentSearchResult[] = MOCK_STUDENTS.map((student) => {
       const profile = MOCK_PROFILES.find((p) => p.id === student.id);
       const dues = MOCK_STUDENT_DUES.filter((d) => d.student_id === student.id);
 
@@ -298,15 +312,9 @@ export async function searchStudents(query?: string): Promise<AdminStudentSearch
         outstandingBalance: remaining,
         status: (remaining === 0 && totalPaid > 0 ? 'PAID' : totalPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID') as Database['public']['Enums']['due_status'],
       };
-    }).filter((s) => {
-      if (!normalizedQuery) return true;
-      return (
-        s.studentNumber.toLowerCase().includes(normalizedQuery) ||
-        s.nameAr.toLowerCase().includes(normalizedQuery) ||
-        s.nameEn.toLowerCase().includes(normalizedQuery) ||
-        s.email.toLowerCase().includes(normalizedQuery)
-      );
     });
+
+    return filterStudentSearchResults(items, normalizedQuery);
   }
 
   throw new Error('Student database is not configured and development mock data is disabled.');
