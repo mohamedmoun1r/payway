@@ -383,9 +383,31 @@ function cleanLocalFixtures(unauthAuditId?: number | null, testTxnId?: string | 
        OR email_change_token_new IS NULL
        OR email_change IS NULL;
 
-    -- 6. Enforce Migration 5 RPC permissions on record_manual_payment_atomic
-    REVOKE EXECUTE ON FUNCTION public.record_manual_payment_atomic(UUID, UUID, NUMERIC, public.payment_method, DATE, TIME, VARCHAR, TEXT, UUID, VARCHAR, VARCHAR) FROM authenticated, anon;
-    GRANT EXECUTE ON FUNCTION public.record_manual_payment_atomic(UUID, UUID, NUMERIC, public.payment_method, DATE, TIME, VARCHAR, TEXT, UUID, VARCHAR, VARCHAR) TO service_role;
+    -- 6. Verify Migration 5 RPC permissions on record_manual_payment_atomic (Fail-Closed)
+    DO $$
+    DECLARE
+      v_auth_exec BOOLEAN;
+      v_anon_exec BOOLEAN;
+      v_srv_exec BOOLEAN;
+    BEGIN
+      SELECT
+        has_function_privilege('authenticated', 'public.record_manual_payment_atomic(uuid, uuid, numeric, public.payment_method, date, time, character varying, text, uuid, character varying, character varying)', 'EXECUTE'),
+        has_function_privilege('anon', 'public.record_manual_payment_atomic(uuid, uuid, numeric, public.payment_method, date, time, character varying, text, uuid, character varying, character varying)', 'EXECUTE'),
+        has_function_privilege('service_role', 'public.record_manual_payment_atomic(uuid, uuid, numeric, public.payment_method, date, time, character varying, text, uuid, character varying, character varying)', 'EXECUTE')
+      INTO v_auth_exec, v_anon_exec, v_srv_exec;
+
+      IF v_auth_exec THEN
+        RAISE EXCEPTION 'SECURITY PRIVILEGE REGRESSION: Role "authenticated" holds EXECUTE on public.record_manual_payment_atomic. Migration 5 is missing or reverted.';
+      END IF;
+
+      IF v_anon_exec THEN
+        RAISE EXCEPTION 'SECURITY PRIVILEGE REGRESSION: Role "anon" holds EXECUTE on public.record_manual_payment_atomic.';
+      END IF;
+
+      IF NOT v_srv_exec THEN
+        RAISE EXCEPTION 'SECURITY PRIVILEGE REGRESSION: Role "service_role" does NOT hold EXECUTE on public.record_manual_payment_atomic.';
+      END IF;
+    END $$;
   `;
 
   try {
@@ -1001,6 +1023,102 @@ async function runActionTestSuite(): Promise<void> {
     const errorMsg = err instanceof Error ? err.message : String(err);
     results.push({
       name: 'Error Mapping: Database DUE_NOT_FOUND error cleanly mapped to user-facing message',
+      passed: false,
+      error: errorMsg,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // TEST 11: Direct PostgREST RPC Access Boundary — Authenticated Student Blocked
+  // ---------------------------------------------------------------------------
+  try {
+    await loginAsStudent();
+    const { data: studentSessionData } = await ssrAuthClient.auth.getSession();
+    const studentToken = studentSessionData.session?.access_token;
+    if (!studentToken) {
+      throw new Error('Failed to retrieve student access token for direct RPC probe');
+    }
+
+    const studentDirectClient = createSupabaseClient<Database>(LOCAL_SUPABASE_URL, LOCAL_ANON_KEY, {
+      global: { headers: { Authorization: `Bearer ${studentToken}` } },
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    const { data: rpcData, error: rpcError } = await studentDirectClient.rpc('record_manual_payment_atomic', {
+      p_student_id: STUDENT_3_ID,
+      p_semester_id: SEMESTER_ID,
+      p_amount: 500,
+      p_payment_method: 'CASH',
+      p_payment_date: '2026-10-14',
+      p_payment_time: '12:00:00',
+      p_reference_number: 'PROBE-STUDENT-RPC',
+      p_notes: 'Probe direct student PostgREST RPC invocation',
+      p_admin_id: STUDENT_3_ID,
+      p_idempotency_key: `PROBE-STUDENT-RPC-${Date.now()}`,
+      p_verification_hash: 'a'.repeat(64),
+    });
+
+    const isStudentRpcBlocked =
+      rpcData === null &&
+      rpcError !== null &&
+      rpcError.code === '42501' &&
+      (rpcError.message?.includes('permission denied for function record_manual_payment_atomic') ?? false);
+
+    results.push({
+      name: 'Direct PostgREST RPC Boundary: Authenticated student direct RPC call rejected with 42501',
+      passed: !!isStudentRpcBlocked,
+      details: isStudentRpcBlocked
+        ? `Direct student RPC correctly rejected: code="${rpcError?.code}", message="${rpcError?.message}"`
+        : `Unexpected RPC result: data=${JSON.stringify(rpcData)}, error=${JSON.stringify(rpcError)}`,
+    });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    results.push({
+      name: 'Direct PostgREST RPC Boundary: Authenticated student direct RPC call rejected with 42501',
+      passed: false,
+      error: errorMsg,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // TEST 12: Direct PostgREST RPC Access Boundary — Unauthenticated Anon Blocked
+  // ---------------------------------------------------------------------------
+  try {
+    const anonDirectClient = createSupabaseClient<Database>(LOCAL_SUPABASE_URL, LOCAL_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    const { data: anonRpcData, error: anonRpcError } = await anonDirectClient.rpc('record_manual_payment_atomic', {
+      p_student_id: STUDENT_3_ID,
+      p_semester_id: SEMESTER_ID,
+      p_amount: 500,
+      p_payment_method: 'CASH',
+      p_payment_date: '2026-10-14',
+      p_payment_time: '12:05:00',
+      p_reference_number: 'PROBE-ANON-RPC',
+      p_notes: 'Probe direct anon PostgREST RPC invocation',
+      p_admin_id: STUDENT_3_ID,
+      p_idempotency_key: `PROBE-ANON-RPC-${Date.now()}`,
+      p_verification_hash: 'a'.repeat(64),
+    });
+
+    const isAnonRpcBlocked =
+      anonRpcData === null &&
+      anonRpcError !== null &&
+      anonRpcError.code === '42501' &&
+      (anonRpcError.message?.includes('permission denied for function record_manual_payment_atomic') ?? false);
+
+    results.push({
+      name: 'Direct PostgREST RPC Boundary: Unauthenticated anon direct RPC call rejected with 42501',
+      passed: !!isAnonRpcBlocked,
+      details: isAnonRpcBlocked
+        ? `Direct anon RPC correctly rejected: code="${anonRpcError?.code}", message="${anonRpcError?.message}"`
+        : `Unexpected RPC result: data=${JSON.stringify(anonRpcData)}, error=${JSON.stringify(anonRpcError)}`,
+    });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    results.push({
+      name: 'Direct PostgREST RPC Boundary: Unauthenticated anon direct RPC call rejected with 42501',
       passed: false,
       error: errorMsg,
     });

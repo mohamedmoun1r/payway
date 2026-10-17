@@ -90,6 +90,80 @@ BEGIN
     RAISE NOTICE '=== STARTING RECORD_MANUAL_PAYMENT_ATOMIC TEST SUITE ===';
 
     -- -------------------------------------------------------------------------
+    -- TEST 0: Privilege Boundaries on record_manual_payment_atomic (Migration 5)
+    -- -------------------------------------------------------------------------
+    -- 0.1 Verify 'authenticated' role CANNOT execute record_manual_payment_atomic
+    IF has_function_privilege('authenticated', 'public.record_manual_payment_atomic(uuid, uuid, numeric, public.payment_method, date, time, character varying, text, uuid, character varying, character varying)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'TEST 0 FAILED: Role "authenticated" holds EXECUTE on public.record_manual_payment_atomic. Migration 5 revocation failed or was reverted.';
+    END IF;
+
+    -- 0.2 Verify 'anon' role CANNOT execute record_manual_payment_atomic
+    IF has_function_privilege('anon', 'public.record_manual_payment_atomic(uuid, uuid, numeric, public.payment_method, date, time, character varying, text, uuid, character varying, character varying)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'TEST 0 FAILED: Role "anon" holds EXECUTE on public.record_manual_payment_atomic.';
+    END IF;
+
+    -- 0.3 Verify 'service_role' CAN execute record_manual_payment_atomic
+    IF NOT has_function_privilege('service_role', 'public.record_manual_payment_atomic(uuid, uuid, numeric, public.payment_method, date, time, character varying, text, uuid, character varying, character varying)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'TEST 0 FAILED: Role "service_role" does NOT hold EXECUTE on public.record_manual_payment_atomic.';
+    END IF;
+
+    -- 0.4 Verify role switching to 'authenticated' fails closed with insufficient_privilege (42501)
+    v_caught := FALSE;
+    BEGIN
+        SET LOCAL ROLE authenticated;
+        PERFORM public.record_manual_payment_atomic(
+            'f7777777-0000-0000-0000-000000000011'::uuid,
+            'f1111111-0000-0000-0000-000000000001'::uuid,
+            1000.00,
+            'CASH'::public.payment_method,
+            '2026-10-13'::date,
+            '10:30:00'::time,
+            'REF-TEST-AUTH-PROBE',
+            'Probe authenticated role execution directly',
+            'f7777777-0000-0000-0000-000000000001'::uuid,
+            'idemp-test-auth-probe',
+            v_hash
+        );
+    EXCEPTION WHEN insufficient_privilege THEN
+        v_caught := TRUE;
+        RESET ROLE;
+    END;
+
+    IF NOT v_caught THEN
+        RESET ROLE;
+        RAISE EXCEPTION 'TEST 0 FAILED: Direct invocation under role "authenticated" was permitted or did not raise insufficient_privilege (42501).';
+    END IF;
+
+    -- 0.5 Verify role switching to 'anon' fails closed with insufficient_privilege (42501)
+    v_caught := FALSE;
+    BEGIN
+        SET LOCAL ROLE anon;
+        PERFORM public.record_manual_payment_atomic(
+            'f7777777-0000-0000-0000-000000000011'::uuid,
+            'f1111111-0000-0000-0000-000000000001'::uuid,
+            1000.00,
+            'CASH'::public.payment_method,
+            '2026-10-13'::date,
+            '10:30:00'::time,
+            'REF-TEST-ANON-PROBE',
+            'Probe anon role execution directly',
+            'f7777777-0000-0000-0000-000000000001'::uuid,
+            'idemp-test-anon-probe',
+            v_hash
+        );
+    EXCEPTION WHEN insufficient_privilege THEN
+        v_caught := TRUE;
+        RESET ROLE;
+    END;
+
+    IF NOT v_caught THEN
+        RESET ROLE;
+        RAISE EXCEPTION 'TEST 0 FAILED: Direct invocation under role "anon" was permitted or did not raise insufficient_privilege (42501).';
+    END IF;
+
+    RAISE NOTICE '✅ TEST 0 PASSED: Database catalog privilege boundaries verified (authenticated=FALSE, anon=FALSE, service_role=TRUE)';
+
+    -- -------------------------------------------------------------------------
     -- TEST 1: Valid Partial Payment (5,000 EGP out of 15,000 EGP)
     -- -------------------------------------------------------------------------
     SELECT * INTO v_res FROM public.record_manual_payment_atomic(
