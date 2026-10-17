@@ -3,20 +3,39 @@ name: Security Regression Tests
 on:
   push:
     branches:
+      - master
       - 'security/**'
-  pull_request:
-    branches: [master]
     paths:
-      - 'src/lib/auth/receipt-hash.ts'
+      - 'src/lib/auth/**'
       - 'src/lib/actions/payment.actions.ts'
+      - 'scripts/preload-server-only.js'
       - 'scripts/test-phase5-security.ts'
+      - 'scripts/test-local-server-action.ts'
       - 'src/lib/validations/payment.schema.ts'
       - 'src/lib/data/**'
       - 'supabase/**'
-      - 'scripts/test-local-server-action.ts'
       - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/security-regression.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'src/lib/auth/**'
+      - 'src/lib/actions/payment.actions.ts'
+      - 'scripts/preload-server-only.js'
+      - 'scripts/test-phase5-security.ts'
+      - 'scripts/test-local-server-action.ts'
+      - 'src/lib/validations/payment.schema.ts'
+      - 'src/lib/data/**'
+      - 'supabase/**'
+      - 'package.json'
+      - 'package-lock.json'
       - '.github/workflows/security-regression.yml'
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 permissions:
   contents: read
