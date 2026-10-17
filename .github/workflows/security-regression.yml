@@ -13,6 +13,8 @@ on:
       - 'src/lib/validations/payment.schema.ts'
       - 'src/lib/data/**'
       - 'supabase/**'
+      - 'scripts/test-local-server-action.ts'
+      - 'package.json'
       - '.github/workflows/security-regression.yml'
   workflow_dispatch:
 
@@ -143,5 +145,200 @@ jobs:
             END IF;
 
             RAISE NOTICE 'ROLLBACK VERIFICATION PASSED: Zero residual test fixtures detected across all fixture tables.';
+          END $$;
+          EOF
+
+  local-server-action-integration:
+    name: Local Server Action Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: 2.120.0
+
+      - name: Start local Supabase stack
+        run: |
+          supabase start -x studio,mailpit,vector,logflare,edge-runtime,storage-api,realtime
+
+      - name: Run Server Action integration test suite
+        env:
+          NODE_ENV: test
+          LOCAL_SUPABASE_URL: http://127.0.0.1:54321
+          RECEIPT_HMAC_SECRET: payway-ci-only-test-secret-not-for-production
+        run: |
+          rm -f .temp/test-fixtures.json
+          npm run test:action:local
+
+      - name: Verify zero residual test fixtures in PostgreSQL
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = "./.temp/test-fixtures.json";
+            if (!fs.existsSync(path)) {
+              console.error("FATAL: Test fixture manifest .temp/test-fixtures.json does not exist. Test execution may have failed before writing fixtures.");
+              process.exit(1);
+            }
+            let manifest;
+            try {
+              manifest = JSON.parse(fs.readFileSync(path, "utf8"));
+            } catch (err) {
+              console.error("FATAL: .temp/test-fixtures.json is not valid JSON:", err.message);
+              process.exit(1);
+            }
+            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const requiredFields = [
+              { key: "idempotencyKey", validate: (v) => typeof v === "string" && v.startsWith("ACTION-PAY-E2E-") },
+              { key: "transactionId", validate: (v) => typeof v === "string" && uuidRegex.test(v) },
+              { key: "receiptId", validate: (v) => typeof v === "string" && uuidRegex.test(v) },
+              { key: "transactionNumber", validate: (v) => typeof v === "string" && v.length > 0 },
+              { key: "receiptNumber", validate: (v) => typeof v === "string" && v.length > 0 },
+              { key: "referenceNumber", validate: (v) => typeof v === "string" && v.startsWith("REF-ACTION-E2E-") },
+              { key: "unauthAuditLogId", validate: (v) => typeof v === "number" && Number.isInteger(v) && v > 0 }
+            ];
+            for (const field of requiredFields) {
+              if (!field.validate(manifest[field.key])) {
+                console.error(`FATAL: Test fixture manifest is missing valid required field "${field.key}":`, manifest[field.key]);
+                process.exit(1);
+              }
+            }
+            console.log("PASS: Validated test fixtures manifest:", JSON.stringify(manifest));
+          '
+
+          TXN_ID=$(node -e "console.log(require('./.temp/test-fixtures.json').transactionId)")
+          RCP_ID=$(node -e "console.log(require('./.temp/test-fixtures.json').receiptId)")
+          RCP_NUM=$(node -e "console.log(require('./.temp/test-fixtures.json').receiptNumber)")
+          TXN_NUM=$(node -e "console.log(require('./.temp/test-fixtures.json').transactionNumber)")
+          REF_NUM=$(node -e "console.log(require('./.temp/test-fixtures.json').referenceNumber)")
+          UNAUTH_ID=$(node -e "console.log(require('./.temp/test-fixtures.json').unauthAuditLogId)")
+          IDEM_KEY=$(node -e "console.log(require('./.temp/test-fixtures.json').idempotencyKey)")
+
+          docker exec -i supabase_db_payway psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v txn_id="$TXN_ID" \
+            -v rcp_id="$RCP_ID" \
+            -v rcp_num="$RCP_NUM" \
+            -v txn_num="$TXN_NUM" \
+            -v ref_num="$REF_NUM" \
+            -v unauth_id="$UNAUTH_ID" \
+            -v idem_key="$IDEM_KEY" << 'EOF'
+          SELECT set_config('custom.test_txn_id', :'txn_id', false);
+          SELECT set_config('custom.test_rcp_id', :'rcp_id', false);
+          SELECT set_config('custom.test_rcp_num', :'rcp_num', false);
+          SELECT set_config('custom.test_txn_num', :'txn_num', false);
+          SELECT set_config('custom.test_ref_num', :'ref_num', false);
+          SELECT set_config('custom.test_unauth_id', :'unauth_id', false);
+          SELECT set_config('custom.test_idem_key', :'idem_key', false);
+
+          DO $$
+          DECLARE
+            v_test_txn_id UUID := current_setting('custom.test_txn_id')::uuid;
+            v_test_rcp_id UUID := current_setting('custom.test_rcp_id')::uuid;
+            v_test_rcp_num TEXT := current_setting('custom.test_rcp_num');
+            v_test_txn_num TEXT := current_setting('custom.test_txn_num');
+            v_test_ref_num TEXT := current_setting('custom.test_ref_num');
+            v_test_unauth_id BIGINT := current_setting('custom.test_unauth_id')::bigint;
+            v_test_idem_key TEXT := current_setting('custom.test_idem_key');
+
+            -- Current-run specific checks
+            v_run_txns INT;
+            v_run_receipts INT;
+            v_run_payment_audits INT;
+            v_run_unauth_audits INT;
+
+            -- Shared prefix / leftover checks
+            v_leftover_txns INT;
+            v_leftover_receipts INT;
+
+            -- Separate fail-closed orphan receipt check (test-owned)
+            v_orphan_receipts INT;
+
+            -- Baseline financial check
+            v_paid NUMERIC;
+            v_due_status public.due_status;
+          BEGIN
+            IF v_test_txn_id IS NULL OR v_test_rcp_id IS NULL OR v_test_rcp_num IS NULL OR v_test_rcp_num = '' OR v_test_txn_num IS NULL OR v_test_txn_num = '' OR v_test_ref_num IS NULL OR v_test_ref_num = '' OR v_test_unauth_id IS NULL OR v_test_idem_key IS NULL OR v_test_idem_key = '' THEN
+              RAISE EXCEPTION 'FATAL: Required test fixture identifiers are missing in SQL verification step.';
+            END IF;
+
+            -- A. Verify current-run specific fixtures are zero (checked independently of deleted parent rows)
+            SELECT count(*) INTO v_run_txns FROM public.transactions
+            WHERE id = v_test_txn_id OR idempotency_key = v_test_idem_key;
+
+            SELECT count(*) INTO v_run_receipts FROM public.receipts
+            WHERE id = v_test_rcp_id OR transaction_id = v_test_txn_id;
+
+            SELECT count(*) INTO v_run_payment_audits FROM public.audit_logs
+            WHERE action = 'PAYMENT_RECORDED' AND entity_name = 'transactions' AND entity_id = v_test_txn_id::text;
+
+            SELECT count(*) INTO v_run_unauth_audits FROM public.audit_logs
+            WHERE id = v_test_unauth_id;
+
+            -- B. Verify shared test prefix leftovers are zero
+            SELECT count(*) INTO v_leftover_txns FROM public.transactions
+            WHERE idempotency_key LIKE 'ACTION-PAY-E2E-%' AND id != v_test_txn_id;
+
+            SELECT count(*) INTO v_leftover_receipts FROM public.receipts
+            WHERE transaction_id IN (
+              SELECT id FROM public.transactions WHERE idempotency_key LIKE 'ACTION-PAY-E2E-%'
+            );
+
+            -- C. Verify test-owned orphan receipts are zero (identified independently of existing parent transactions).
+            -- Invariant: 'REF-ACTION-E2E-%' is exclusively reserved for this integration test suite
+            -- (never generated or referenced by production code or seed fixtures). Both exact current-run
+            -- manifest identifiers and the reserved prefix are checked so orphan receipts from crashed runs
+            -- or missing parent transactions fail closed without misclassifying unrelated receipts.
+            SELECT count(*) INTO v_orphan_receipts FROM public.receipts r
+            WHERE (
+              r.id = v_test_rcp_id
+              OR r.receipt_number = v_test_rcp_num
+              OR r.transaction_id = v_test_txn_id
+              OR r.metadata->>'txn_number' = v_test_txn_num
+              OR r.metadata->>'reference_number' = v_test_ref_num
+              OR r.metadata->>'reference_number' LIKE 'REF-ACTION-E2E-%'
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM public.transactions t WHERE t.id = r.transaction_id
+            );
+
+            -- D. Verify student dues baseline is strictly restored
+            SELECT paid_amount, status INTO v_paid, v_due_status
+            FROM public.student_dues
+            WHERE id = 'd3333333-0000-0000-0000-000000000001';
+
+            -- Fail closed with precise diagnosis identifying the exact cause
+            IF v_run_txns > 0 OR v_run_receipts > 0 OR v_run_payment_audits > 0 OR v_run_unauth_audits > 0 THEN
+              RAISE EXCEPTION 'CLEANUP FAILURE (CURRENT RUN): Test fixtures created by this run were not deleted (txns: %, receipts: %, payment audits: %, unauth audits: %)',
+                v_run_txns, v_run_receipts, v_run_payment_audits, v_run_unauth_audits;
+            END IF;
+
+            IF v_leftover_txns > 0 OR v_leftover_receipts > 0 THEN
+              RAISE EXCEPTION 'CLEANUP FAILURE (LEFTOVER PREFIX): Residual fixtures matching ACTION-PAY-E2E- prefix detected (leftover txns: %, leftover receipts: %)',
+                v_leftover_txns, v_leftover_receipts;
+            END IF;
+
+            IF v_orphan_receipts > 0 THEN
+              RAISE EXCEPTION 'CLEANUP FAILURE (ORPHAN RECEIPTS): Residual orphan test receipts detected without existing parent transactions (orphan receipts: %)',
+                v_orphan_receipts;
+            END IF;
+
+            IF v_paid != 0.00 OR v_due_status != 'UNPAID' THEN
+              RAISE EXCEPTION 'BASELINE RESTORATION FAILURE: Seeded student due not restored to pristine state (paid: %, status: %)',
+                v_paid, v_due_status;
+            END IF;
+
+            RAISE NOTICE 'POST-TEST CLEANUP CONFIRMED: Database is in pristine seeded state. Current-run fixtures, shared-prefix leftovers, and orphan test receipts are zero.';
           END $$;
           EOF
