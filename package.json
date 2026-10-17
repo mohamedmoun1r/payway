@@ -9,7 +9,8 @@
     "lint": "next lint",
     "test:security": "tsx -r ./scripts/preload-server-only.js scripts/test-phase5-security.ts",
     "test:connection": "tsx scripts/test-supabase-connection.ts",
-    "test:phase8": "tsx -r ./scripts/preload-server-only.js scripts/test-phase8-regression.ts"
+    "test:phase8": "tsx -r ./scripts/preload-server-only.js scripts/test-phase8-regression.ts",
+    "test:action:local": "tsx -r ./scripts/preload-server-only.js scripts/test-local-server-action.ts"
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.9.0",
